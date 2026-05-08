@@ -4,3 +4,4 @@ numpy
 pymupdf
 svgwrite
 gunicorn
+anthropic
