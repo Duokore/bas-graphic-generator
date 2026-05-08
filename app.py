@@ -52,10 +52,11 @@ def mask_to_svg(dwg, mask, color):
         )
 
 
-def create_svg(width, height, edges, ducts, blue, green, purple):
+def create_svg(width, height, edges, auto_detect, ducts, blue, green, purple):
     dwg = svgwrite.Drawing(SVG_OUTPUT_PATH, size=(width, height))
 
     mask_to_svg(dwg, edges, "rgb(120,120,128)")
+    mask_to_svg(dwg, auto_detect, "rgb(180,180,190)")
     mask_to_svg(dwg, ducts, "rgb(220,220,220)")
     mask_to_svg(dwg, blue, "rgb(255,120,0)")
     mask_to_svg(dwg, green, "rgb(80,220,80)")
@@ -134,17 +135,35 @@ def generate():
     edges = cv2.morphologyEx(edges, cv2.MORPH_OPEN, cleanup_kernel)
 
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(edges)
-
     clean_edges = np.zeros_like(edges)
 
     for i in range(1, num_labels):
         area = stats[i, cv2.CC_STAT_AREA]
-
         if area > 50:
             clean_edges[labels == i] = 255
 
     edges = cv2.dilate(clean_edges, np.ones((2, 2), np.uint8), iterations=1)
 
+    # AI AUTO-DETECTION MODE BASIC
+    adaptive = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        11,
+        2
+    )
+
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 3))
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 25))
+
+    horizontal_lines = cv2.morphologyEx(adaptive, cv2.MORPH_OPEN, horizontal_kernel)
+    vertical_lines = cv2.morphologyEx(adaptive, cv2.MORPH_OPEN, vertical_kernel)
+
+    auto_detect = cv2.addWeighted(horizontal_lines, 1, vertical_lines, 1, 0)
+    auto_detect = cv2.dilate(auto_detect, np.ones((2, 2), np.uint8), iterations=1)
+
+    # COLOR-GUIDED DETECTION
     red1 = cv2.inRange(hsv, np.array([0, 70, 50]), np.array([12, 255, 255]))
     red2 = cv2.inRange(hsv, np.array([165, 70, 50]), np.array([180, 255, 255]))
     ducts = red1 + red2
@@ -159,6 +178,7 @@ def generate():
     purple = cv2.dilate(purple, np.ones((3, 3), np.uint8), iterations=1)
 
     canvas[edges > 0] = (120, 120, 128, 255)
+    canvas[auto_detect > 0] = (180, 180, 190, 255)
     canvas[ducts > 0] = (220, 220, 220, 255)
     canvas[blue > 0] = (255, 120, 0, 255)
     canvas[green > 0] = (80, 220, 80, 255)
@@ -167,7 +187,7 @@ def generate():
     cv2.imwrite(PNG_OUTPUT_PATH, canvas)
     cv2.imwrite(UPLOAD_IMAGE_PATH, img)
 
-    create_svg(target_w, target_h, edges, ducts, blue, green, purple)
+    create_svg(target_w, target_h, edges, auto_detect, ducts, blue, green, purple)
 
     original_base64 = image_to_base64(UPLOAD_IMAGE_PATH)
     generated_base64 = image_to_base64(PNG_OUTPUT_PATH)
@@ -237,7 +257,7 @@ def generate():
         <h1 style="text-align:center;">BAS Graphic Comparison</h1>
 
         <p style="text-align:center;color:#b8bcc8;">
-            Smart Cleanup Mode · Scroll to zoom · Drag to pan
+            AI Auto-Detection Basic · Smart Cleanup · Scroll to zoom · Drag to pan
         </p>
 
         <div class="grid">
