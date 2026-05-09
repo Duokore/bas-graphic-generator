@@ -1,10 +1,11 @@
- from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string
 import os
 import base64
 import json
+import math
 import cv2
+import numpy as np
 import fitz
-import anthropic
 
 app = Flask(__name__)
 
@@ -16,7 +17,12 @@ UPLOAD_PDF_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_upload.pdf")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+# Detection parameters
+MIN_VAV_AREA = 40
+MAX_VAV_AREA = 1200
+MIN_AHU_AREA = 200
+MAX_DISTANCE_TO_DUCT = 120
+TARGET_VAVS = 9
 
 
 def image_to_base64(path):
@@ -32,277 +38,312 @@ def pdf_to_png(pdf_path, out_path):
     doc.close()
 
 
-def analyze_plan_with_claude(image_path):
-    img_b64 = image_to_base64(image_path)
-
-    prompt_text = (
-        "You are an expert HVAC/BAS controls graphic designer and mechanical plan analyst. "
-        "Analyze this HVAC mechanical floor plan and return ONLY valid JSON. "
-        "All coordinates must be normalized 0-1000, where 0,0 is top-left. "
-        "Detect the building perimeter, rooms, VAVs, AHUs, ducts, and diffusers. "
-        "The output will be rendered as a professional 3D BAS graphic, so be accurate. "
-        "Return this JSON schema only:\n"
-        "{"
-        "\"building_outline\":[[x,y],[x,y]],"
-        "\"rooms\":[{\"bbox\":[x,y,w,h]}],"
-        "\"vavs\":[{\"pos\":[x,y]}],"
-        "\"ahus\":[{\"pos\":[x,y],\"size\":[w,h]}],"
-        "\"ducts\":[{\"path\":[[x,y],[x,y]]}],"
-        "\"diffusers\":[{\"pos\":[x,y]}]"
-        "}"
-    )
-
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=8192,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": img_b64,
-                        },
-                    },
-                    {"type": "text", "text": prompt_text},
-                ],
-            }
-        ],
-    )
-
-    response_text = message.content[0].text.strip()
-
-    if response_text.startswith("```"):
-        response_text = response_text.split("```")[1]
-        if response_text.startswith("json"):
-            response_text = response_text[4:]
-        response_text = response_text.strip()
-
-    return json.loads(response_text)
+def clean_mask(mask, iterations=2):
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=iterations)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+    return mask
 
 
-HOME_PAGE = """<!DOCTYPE html>
+def get_contours(mask):
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return contours
+
+
+def contour_center(cnt):
+    x, y, w, h = cv2.boundingRect(cnt)
+    return (int(x + w / 2), int(y + h / 2))
+
+
+def distance_to_nearest_duct(center, ducts):
+    cx, cy = center
+    best = 999999
+    for d in ducts:
+        x, y, w, h = d["x"], d["y"], d["w"], d["h"]
+        pts = [(x, y), (x + w, y), (x, y + h), (x + w, y + h), (x + w // 2, y + h // 2)]
+        for px, py in pts:
+            dist = math.hypot(cx - px, cy - py)
+            if dist < best:
+                best = dist
+    return best
+
+
+def detect_hvac_components(image_path):
+    """Color-based HVAC detection - precise, no AI"""
+    img = cv2.imread(image_path)
+    img_h, img_w = img.shape[:2]
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+    # === RED DUCTS ===
+    red1 = cv2.inRange(hsv, np.array([0, 60, 60]), np.array([10, 255, 255]))
+    red2 = cv2.inRange(hsv, np.array([170, 60, 60]), np.array([180, 255, 255]))
+    red_mask = clean_mask(cv2.bitwise_or(red1, red2), 1)
+
+    ducts = []
+    for cnt in get_contours(red_mask):
+        area = cv2.contourArea(cnt)
+        if area < 40:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        ratio = max(w, h) / max(min(w, h), 1)
+        if ratio > 2.2:
+            ducts.append({
+                "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+                "area": round(float(area), 2)
+            })
+
+    # === BLUE VAVs ===
+    blue_mask = cv2.inRange(hsv, np.array([90, 60, 60]), np.array([140, 255, 255]))
+    blue_mask = clean_mask(blue_mask, 1)
+
+    vavs = []
+    for cnt in get_contours(blue_mask):
+        area = cv2.contourArea(cnt)
+        if area < MIN_VAV_AREA or area > MAX_VAV_AREA:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        ratio = w / max(h, 1)
+        if ratio < 0.35 or ratio > 3.2:
+            continue
+        center = contour_center(cnt)
+        dist = distance_to_nearest_duct(center, ducts)
+        if dist > MAX_DISTANCE_TO_DUCT:
+            continue
+        vavs.append({
+            "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+            "area": round(float(area), 2),
+            "distance_to_duct": round(float(dist), 2),
+            "cx": center[0], "cy": center[1]
+        })
+
+    # Keep best VAVs sorted by closeness to ducts
+    vavs = sorted(vavs, key=lambda v: (v["distance_to_duct"], -v["area"]))
+    vavs = vavs[:TARGET_VAVS]
+
+    # === GREEN AHU ===
+    green_mask = cv2.inRange(hsv, np.array([40, 40, 40]), np.array([90, 255, 255]))
+    green_mask = clean_mask(green_mask, 1)
+
+    ahus = []
+    for cnt in get_contours(green_mask):
+        area = cv2.contourArea(cnt)
+        if area < MIN_AHU_AREA:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        cx = int(x + w / 2)
+        cy = int(y + h / 2)
+        ahus.append({
+            "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+            "area": round(float(area), 2),
+            "cx": cx, "cy": cy
+        })
+
+    ahus = sorted(ahus, key=lambda a: a["area"], reverse=True)[:1]
+
+    return {
+        "image_width": img_w,
+        "image_height": img_h,
+        "ducts": ducts,
+        "vavs": vavs,
+        "ahus": ahus
+    }
+
+
+def detect_walls(image_path):
+    """Detect building walls and outline using edge detection"""
+    img = cv2.imread(image_path)
+    img_h, img_w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Threshold to binary
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Remove small components (text, symbols)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
+    cleaned = np.zeros_like(binary)
+    for i in range(1, num_labels):
+        w = stats[i, cv2.CC_STAT_WIDTH]
+        h = stats[i, cv2.CC_STAT_HEIGHT]
+        area = stats[i, cv2.CC_STAT_AREA]
+        if (max(w, h) / max(min(w, h), 1) > 4 and area > 100) or (area > 800 and w > 50 and h > 50):
+            cleaned[labels == i] = 255
+
+    # Detect lines via Hough
+    edges = cv2.Canny(cleaned, 50, 150)
+    raw_lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=70, minLineLength=60, maxLineGap=15)
+
+    walls = []
+    if raw_lines is not None:
+        for line in raw_lines:
+            x1, y1, x2, y2 = line[0]
+            dx, dy = x2 - x1, y2 - y1
+            length = math.sqrt(dx * dx + dy * dy)
+            if length < 60:
+                continue
+            angle = abs(math.degrees(math.atan2(dy, dx)))
+            if angle < 12 or angle > 168 or (78 < angle < 102):
+                walls.append({"x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)})
+
+    # Find building outline (largest contour)
+    wall_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+    for w in walls:
+        cv2.line(wall_mask, (w["x1"], w["y1"]), (w["x2"], w["y2"]), 255, 8)
+    wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE,
+                                  cv2.getStructuringElement(cv2.MORPH_RECT, (40, 40)))
+
+    contours, _ = cv2.findContours(wall_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    building_outline = []
+    if contours:
+        largest = max(contours, key=cv2.contourArea)
+        epsilon = 0.005 * cv2.arcLength(largest, True)
+        approx = cv2.approxPolyDP(largest, epsilon, True)
+        building_outline = [[int(p[0][0]), int(p[0][1])] for p in approx]
+
+    # Detect rooms (interior spaces)
+    inv = cv2.bitwise_not(wall_mask)
+    nl, lbl, st, _ = cv2.connectedComponentsWithStats(inv)
+    rooms = []
+    img_area = img_h * img_w
+    for i in range(1, nl):
+        area = st[i, cv2.CC_STAT_AREA]
+        rw = st[i, cv2.CC_STAT_WIDTH]
+        rh = st[i, cv2.CC_STAT_HEIGHT]
+        rx = st[i, cv2.CC_STAT_LEFT]
+        ry = st[i, cv2.CC_STAT_TOP]
+        if area < 3000 or area > img_area * 0.7:
+            continue
+        if rw < 50 or rh < 50:
+            continue
+        rooms.append({"x": int(rx), "y": int(ry), "w": int(rw), "h": int(rh)})
+
+    return {"walls": walls, "rooms": rooms, "building_outline": building_outline}
+
+
+def build_duct_paths(ducts):
+    """Convert duct rectangles into path segments for 3D rendering"""
+    paths = []
+    for d in ducts:
+        # Treat each duct rectangle as a line segment along its longest dimension
+        x, y, w, h = d["x"], d["y"], d["w"], d["h"]
+        if w >= h:
+            # Horizontal duct
+            paths.append({"path": [[x, y + h // 2], [x + w, y + h // 2]]})
+        else:
+            # Vertical duct
+            paths.append({"path": [[x + w // 2, y], [x + w // 2, y + h]]})
+    return paths
+
+
+HOME_PAGE = '''<!DOCTYPE html>
 <html>
 <head>
-<title>BAS Generator v14</title>
+<title>BAS Generator v14 - Color Detection + 3D</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-    background: #050608;
-    color: white;
-    font-family: 'Segoe UI', Arial, sans-serif;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-.card {
-    background: #11141d;
-    border: 1px solid #262b3a;
-    border-radius: 26px;
-    padding: 52px;
-    text-align: center;
-    max-width: 760px;
-    width: 90%;
-    box-shadow: 0 0 70px rgba(0,0,0,0.75);
-}
-.logo { font-size: 58px; margin-bottom: 18px; }
-h1 {
-    font-size: 34px;
-    margin-bottom: 8px;
-    color: #7aa7ff;
-}
-.sub { color: #8b93ad; font-size: 14px; margin-bottom: 34px; }
-.zone {
-    border: 2px dashed #2b3145;
-    border-radius: 18px;
-    padding: 38px;
-    margin-bottom: 24px;
-    background: #0d1018;
-}
+body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+.card { background: #181b24; border: 1px solid #2a2f3e; border-radius: 24px; padding: 50px; text-align: center; max-width: 720px; width: 90%; box-shadow: 0 0 60px rgba(0,0,0,0.6); }
+.logo { font-size: 56px; margin-bottom: 16px; }
+h1 { font-size: 32px; margin-bottom: 8px; background: linear-gradient(135deg, #2d89ef, #b388ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.sub { color: #7a8099; font-size: 14px; margin-bottom: 16px; }
+.notice { background: #1e3a5f; border: 1px solid #2d5a8f; border-radius: 12px; padding: 14px; margin-bottom: 24px; font-size: 13px; color: #b8d4f0; text-align: left; }
+.notice b { color: #ffd54f; }
+.zone { border: 2px dashed #2d3348; border-radius: 16px; padding: 36px; margin-bottom: 24px; background: #13151d; }
 .zone:hover { border-color: #2d89ef; }
-input[type=file] {
-    background: transparent;
-    color: #cbd5e1;
-    border: none;
-    font-size: 14px;
-    width: 100%;
-}
-.btn {
-    background: linear-gradient(135deg, #1d65d8, #2d89ef);
-    color: white;
-    border: none;
-    border-radius: 14px;
-    padding: 18px 40px;
-    font-size: 18px;
-    font-weight: 700;
-    cursor: pointer;
-    width: 100%;
-}
-.badge {
-    display: inline-block;
-    background: #171c2d;
-    border: 1px solid #2c3655;
-    border-radius: 9px;
-    padding: 7px 15px;
-    font-size: 12px;
-    color: #aab7e8;
-    margin: 4px;
-}
-.footer { color: #4a5068; font-size: 12px; margin-top: 28px; }
+input[type=file] { background: transparent; color: #aab0c4; border: none; font-size: 14px; width: 100%; cursor: pointer; }
+.lbl { display: block; font-size: 13px; color: #5a6280; margin-top: 10px; }
+.btn { background: linear-gradient(135deg, #1a6fd4, #2d89ef); color: white; border: none; border-radius: 14px; padding: 18px 40px; font-size: 18px; font-weight: 700; cursor: pointer; width: 100%; }
+.badge { display: inline-block; background: #1e2233; border: 1px solid #2a3050; border-radius: 8px; padding: 6px 14px; font-size: 12px; color: #6878a8; margin: 4px; }
+.green { background: linear-gradient(135deg, #1a9e4a, #16a34a); color: white; border: none; }
+.pro { background: linear-gradient(135deg, #ff9800, #ff5722); color: white; border: none; }
+.note { font-size: 12px; color: #5a6280; margin-top: 14px; font-style: italic; }
+.footer { color: #3a4060; font-size: 12px; margin-top: 28px; }
 </style>
 </head>
 <body>
 <div class="card">
-    <div class="logo">🏢</div>
-    <h1>BAS Graphic Generator v14</h1>
-    <p class="sub">Professional 3D HVAC / BAS Visualization</p>
-
-    <div style="margin-bottom:24px;">
-        <span class="badge">Claude AI</span>
-        <span class="badge">Three.js 3D</span>
-        <span class="badge">BAS Style Renderer</span>
-        <span class="badge">Isometric View</span>
-    </div>
-
-    <form action="/generate" method="post" enctype="multipart/form-data">
-        <div class="zone">
-            <input type="file" name="file" accept="image/png,image/jpeg,application/pdf" required>
-            <div style="font-size:13px;color:#67708d;margin-top:12px;">
-                Upload mechanical plan - PNG, JPG or PDF
-            </div>
-        </div>
-
-        <button class="btn" type="submit">Generate Professional 3D Graphic</button>
-    </form>
-
-    <div class="footer">Made by Paolo V. and Emmanuel R.</div>
+<div class="logo">&#127970;</div>
+<h1>BAS Graphic Generator v14</h1>
+<p class="sub">Color Detection + 3D Render | No AI Cost</p>
+<div class="notice">
+<b>How to prep your plan:</b><br>
+Mark VAVs in <span style="color:#5b8def">BLUE</span>,
+AHU in <span style="color:#4ade80">GREEN</span>,
+Ducts in <span style="color:#ef4444">RED</span><br>
+Then upload the marked image.
+</div>
+<div style="margin-bottom:24px;">
+<span class="badge green">Color Detection</span>
+<span class="badge pro">Precise (No AI)</span>
+<span class="badge">3D Engine</span>
+<span class="badge">Free Forever</span>
+</div>
+<form action="/generate" method="post" enctype="multipart/form-data">
+<div class="zone">
+<input type="file" name="file" accept="image/png,image/jpeg,application/pdf" required>
+<span class="lbl">Upload your color-marked plan</span>
+</div>
+<button class="btn" type="submit">Generate 3D Graphic</button>
+<p class="note">Processing takes ~5 seconds</p>
+</form>
+<div class="footer">Made by Paolo V. and Emmanuel R.</div>
 </div>
 </body>
-</html>"""
+</html>'''
 
 
-RESULT_PAGE = """<!DOCTYPE html>
+RESULT_PAGE = '''<!DOCTYPE html>
 <html>
 <head>
-<title>Professional 3D BAS Graphic v14</title>
+<title>3D BAS Graphic</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-    background:#050608;
-    color:white;
-    font-family:'Segoe UI', Arial, sans-serif;
-    overflow:hidden;
-}
-.header {
-    height:92px;
-    background:#07090f;
-    border-bottom:1px solid #151923;
-    text-align:center;
-    padding-top:12px;
-}
-h1 {
-    font-size:24px;
-    color:#76a9ff;
-    letter-spacing:.4px;
-}
-.sub {
-    color:#7d88aa;
-    font-size:12px;
-    margin-top:4px;
-}
-.stats {
-    display:flex;
-    justify-content:center;
-    gap:12px;
-    margin-top:10px;
-    flex-wrap:wrap;
-}
-.stat {
-    background:#161b2b;
-    border:1px solid #26304a;
-    padding:6px 14px;
-    border-radius:8px;
-    font-size:12px;
-    color:#cbd5ff;
-}
-.stat b { color:#fff; }
-.viewer-3d {
-    width:100vw;
-    height:calc(100vh - 92px);
-    background:#050608;
-    position:relative;
-}
-.controls-help {
-    position:absolute;
-    bottom:12px;
-    left:12px;
-    background:rgba(0,0,0,.72);
-    padding:9px 14px;
-    border-radius:8px;
-    font-size:11px;
-    color:#e5e7eb;
-    z-index:10;
-}
-.actions {
-    position:absolute;
-    bottom:12px;
-    right:12px;
-    display:flex;
-    gap:8px;
-    z-index:10;
-}
-.btn {
-    padding:10px 16px;
-    border:none;
-    border-radius:9px;
-    font-size:12px;
-    font-weight:700;
-    cursor:pointer;
-}
-.btn-green { background:#16a34a; color:white; }
-.btn-blue { background:#2563eb; color:white; }
-.btn-gray { background:#242936; color:#d1d5db; }
+body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; padding: 12px; }
+h1 { text-align: center; font-size: 22px; margin-bottom: 4px; background: linear-gradient(135deg, #2d89ef, #b388ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.sub { text-align: center; color: #6878a8; font-size: 12px; margin-bottom: 10px; }
+.stats { display: flex; justify-content: center; gap: 10px; margin: 8px 0 12px; flex-wrap: wrap; }
+.stat { background: #1e2233; padding: 5px 12px; border-radius: 8px; font-size: 12px; color: #aab0c4; border: 1px solid #2a3050; }
+.stat b { color: #fff; }
+.viewer-3d { width: 100%; height: 80vh; background: #000000; border-radius: 12px; border: 1px solid #2a3050; overflow: hidden; position: relative; }
+.controls-help { position: absolute; bottom: 10px; left: 10px; background: rgba(0,0,0,0.7); color: white; padding: 6px 12px; border-radius: 8px; font-size: 11px; z-index: 10; border: 1px solid #333; }
+.actions { text-align: center; margin-top: 12px; display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
+.btn { padding: 10px 18px; border: none; border-radius: 10px; font-size: 13px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-block; }
+.btn-blue { background: #1a6fd4; color: white; }
+.btn-green { background: #1a9e4a; color: white; }
+.btn-gray { background: #252a38; color: #aab0c4; }
+.btn-orange { background: #ff7e1a; color: white; }
+.footer { text-align: center; color: #3a4060; font-size: 11px; margin-top: 10px; }
 </style>
 </head>
-
 <body>
-<div class="header">
-    <h1>Professional 3D BAS Graphic v14</h1>
-    <p class="sub">Flat Isometric · Black Background · BAS Controls Style</p>
-    <div class="stats">
-        <div class="stat">Rooms: <b>{{ n_rooms }}</b></div>
-        <div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
-        <div class="stat">AHUs: <b>{{ n_ahus }}</b></div>
-        <div class="stat">Ducts: <b>{{ n_ducts }}</b></div>
-        <div class="stat">Diffusers: <b>{{ n_diffs }}</b></div>
-    </div>
+<h1>Professional 3D BAS Graphic</h1>
+<p class="sub">Drag = Rotate | Scroll = Zoom | Right-click = Pan</p>
+<div class="stats">
+<div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
+<div class="stat">AHUs: <b>{{ n_ahus }}</b></div>
+<div class="stat">Ducts: <b>{{ n_ducts }}</b></div>
+<div class="stat">Rooms: <b>{{ n_rooms }}</b></div>
 </div>
-
 <div class="viewer-3d" id="viewer">
-    <div class="controls-help">
-        Left drag = Rotate | Scroll = Zoom | Right drag = Pan
-    </div>
-
-    <div class="actions">
-        <button onclick="screenshot()" class="btn btn-green">Download PNG</button>
-        <button onclick="flatView()" class="btn btn-blue">Flat View</button>
-        <button onclick="resetView()" class="btn btn-gray">Reset</button>
-        <a href="/" style="text-decoration:none;"><button class="btn btn-gray">New Plan</button></a>
-    </div>
+<div class="controls-help"><b>Drag</b> rotate | <b>Scroll</b> zoom | <b>Right-click</b> pan</div>
 </div>
+<div class="actions">
+<button onclick="screenshot()" class="btn btn-green">Download PNG</button>
+<button onclick="topView()" class="btn btn-orange">Top View</button>
+<button onclick="frontView()" class="btn btn-blue">Synchrony View</button>
+<button onclick="resetView()" class="btn btn-blue">Reset</button>
+<a href="/" class="btn btn-gray">New Plan</a>
+</div>
+<div class="footer">Made by Paolo V. and Emmanuel R.</div>
 
 <script>
-const planData = {{ plan_data_json | safe }};
+const detectionData = {{ detection_json | safe }};
 
 let scene, camera, renderer, controls;
 let initialCameraPos, initialTarget;
-let buildingCenter = { x: 500, z: 500, sizeX: 1000, sizeZ: 1000 };
+let buildingCenter = { x: 0, z: 0, sizeX: 1000, sizeZ: 1000 };
 
 function init() {
     const container = document.getElementById('viewer');
@@ -310,30 +351,23 @@ function init() {
     const height = container.clientHeight;
 
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x050608);
+    scene.background = new THREE.Color(0x000000);
 
-    camera = new THREE.PerspectiveCamera(22, width / height, 0.1, 9000);
+    camera = new THREE.PerspectiveCamera(28, width / height, 0.1, 20000);
 
-    renderer = new THREE.WebGLRenderer({
-        antialias:true,
-        preserveDrawingBuffer:true,
-        alpha:false
-    });
-
+    renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.outputEncoding = THREE.sRGBEncoding;
-
     container.appendChild(renderer.domElement);
 
     controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
-    controls.minDistance = 220;
-    controls.maxDistance = 3500;
-    controls.enablePan = true;
+    controls.minDistance = 50;
+    controls.maxDistance = 8000;
 
     setupLighting();
     buildScene();
@@ -343,333 +377,243 @@ function init() {
 }
 
 function setupLighting() {
-    scene.add(new THREE.AmbientLight(0xffffff, 0.82));
+    const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+    scene.add(ambient);
 
-    const topLight = new THREE.DirectionalLight(0xffffff, 0.7);
-    topLight.position.set(0, 950, 240);
-    topLight.castShadow = true;
-    topLight.shadow.mapSize.width = 4096;
-    topLight.shadow.mapSize.height = 4096;
-    topLight.shadow.camera.left = -1800;
-    topLight.shadow.camera.right = 1800;
-    topLight.shadow.camera.top = 1800;
-    topLight.shadow.camera.bottom = -1800;
-    scene.add(topLight);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x404040, 0.55);
+    hemi.position.set(0, 800, 0);
+    scene.add(hemi);
 
-    const softFill = new THREE.HemisphereLight(0xe2eaff, 0x202020, 0.65);
-    scene.add(softFill);
+    const key = new THREE.DirectionalLight(0xffffff, 0.85);
+    key.position.set(300, 1500, 600);
+    key.castShadow = true;
+    key.shadow.mapSize.width = 4096;
+    key.shadow.mapSize.height = 4096;
+    key.shadow.camera.left = -2000;
+    key.shadow.camera.right = 2000;
+    key.shadow.camera.top = 2000;
+    key.shadow.camera.bottom = -2000;
+    key.shadow.camera.near = 100;
+    key.shadow.camera.far = 5000;
+    key.shadow.bias = -0.0008;
+    key.shadow.radius = 6;
+    scene.add(key);
+
+    const fill = new THREE.DirectionalLight(0xffffff, 0.35);
+    fill.position.set(-500, 800, -300);
+    scene.add(fill);
 }
 
 function buildScene() {
-    const SCALE = 1.0;
-    const WALL_HEIGHT = 86;
-    const EXT_WALL = 14;
-    const INT_WALL = 8;
+    const imgW = detectionData.image_width;
+    const imgH = detectionData.image_height;
 
-    let cx = 500, cy = 500;
-    let sizeX = 1000, sizeZ = 1000;
-
-    if (planData.building_outline && planData.building_outline.length > 2) {
-        const xs = planData.building_outline.map(p => p[0]);
-        const ys = planData.building_outline.map(p => p[1]);
-        cx = (Math.min(...xs) + Math.max(...xs)) / 2;
-        cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-        sizeX = Math.max(...xs) - Math.min(...xs);
-        sizeZ = Math.max(...ys) - Math.min(...ys);
+    // Use building outline if detected, otherwise full image bounds
+    let outline = detectionData.building_outline;
+    if (!outline || outline.length < 3) {
+        outline = [[0, 0], [imgW, 0], [imgW, imgH], [0, imgH]];
     }
 
-    buildingCenter = { x:cx, z:cy, sizeX:sizeX, sizeZ:sizeZ };
+    const xs = outline.map(p => p[0]);
+    const ys = outline.map(p => p[1]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const sizeX = Math.max(...xs) - Math.min(...xs);
+    const sizeZ = Math.max(...ys) - Math.min(...ys);
+
+    buildingCenter = { x: cx, z: cy, sizeX, sizeZ };
+
+    const WALL_HEIGHT = 75;
+    const EXT_WALL_THICKNESS = 12;
+    const INT_WALL_THICKNESS = 7;
 
     function toWorld(p) {
-        return [(p[0] - cx) * SCALE, (p[1] - cy) * SCALE];
+        return [p[0] - cx, p[1] - cy];
     }
 
+    function pointToWorld(x, y) {
+        return [x - cx, y - cy];
+    }
+
+    // === FLOOR with TILE pattern ===
+    const floorShape = new THREE.Shape();
+    const outlineWorld = outline.map(toWorld);
+    floorShape.moveTo(outlineWorld[0][0], outlineWorld[0][1]);
+    for (let i = 1; i < outlineWorld.length; i++) {
+        floorShape.lineTo(outlineWorld[i][0], outlineWorld[i][1]);
+    }
+    floorShape.lineTo(outlineWorld[0][0], outlineWorld[0][1]);
+
+    // Procedural tile texture
+    const tileCanvas = document.createElement('canvas');
+    tileCanvas.width = 512;
+    tileCanvas.height = 512;
+    const tctx = tileCanvas.getContext('2d');
+    tctx.fillStyle = '#a8a8ac';
+    tctx.fillRect(0, 0, 512, 512);
+    tctx.strokeStyle = '#ffffff';
+    tctx.lineWidth = 2;
+    for (let i = 0; i <= 512; i += 64) {
+        tctx.beginPath();
+        tctx.moveTo(i, 0);
+        tctx.lineTo(i, 512);
+        tctx.stroke();
+        tctx.beginPath();
+        tctx.moveTo(0, i);
+        tctx.lineTo(512, i);
+        tctx.stroke();
+    }
+    for (let i = 0; i < 512; i += 64) {
+        for (let j = 0; j < 512; j += 64) {
+            const shade = 168 + Math.random() * 12 - 6;
+            tctx.fillStyle = `rgba(${shade},${shade},${shade+2},0.3)`;
+            tctx.fillRect(i+1, j+1, 62, 62);
+        }
+    }
+
+    const tileTexture = new THREE.CanvasTexture(tileCanvas);
+    tileTexture.wrapS = THREE.RepeatWrapping;
+    tileTexture.wrapT = THREE.RepeatWrapping;
+    tileTexture.repeat.set(sizeX / 80, sizeZ / 80);
+
+    const floorGeo = new THREE.ShapeGeometry(floorShape);
     const floorMat = new THREE.MeshStandardMaterial({
-        color:0x6f7379,
-        roughness:0.92,
-        metalness:0.02
+        map: tileTexture,
+        roughness: 0.85,
+        metalness: 0.05
     });
-
-    const wallOuterMat = new THREE.MeshStandardMaterial({
-        color:0x3e4249,
-        roughness:0.85,
-        metalness:0.05
-    });
-
-    const wallInnerMat = new THREE.MeshStandardMaterial({
-        color:0x6f747c,
-        roughness:0.86,
-        metalness:0.04
-    });
-
-    createFloor(toWorld, floorMat);
-    createTileGrid(toWorld);
-    createExteriorWalls(toWorld, WALL_HEIGHT, EXT_WALL, wallOuterMat);
-    createInteriorWalls(toWorld, WALL_HEIGHT, INT_WALL, wallInnerMat);
-    createWindows(toWorld, WALL_HEIGHT);
-    createDucts(toWorld, WALL_HEIGHT);
-    createVAVs(toWorld, WALL_HEIGHT);
-    createAHUs(toWorld, WALL_HEIGHT);
-    createDiffusers(toWorld, WALL_HEIGHT);
-
-    const maxSize = Math.max(sizeX, sizeZ);
-
-    camera.position.set(maxSize * 0.42, maxSize * 0.50, maxSize * 0.88);
-    initialCameraPos = camera.position.clone();
-    initialTarget = new THREE.Vector3(0, 30, 0);
-
-    controls.target.copy(initialTarget);
-    controls.update();
-}
-
-function createFloor(toWorld, mat) {
-    if (!planData.building_outline || planData.building_outline.length < 3) return;
-
-    const outline = planData.building_outline.map(toWorld);
-    const shape = new THREE.Shape();
-
-    shape.moveTo(outline[0][0], outline[0][1]);
-
-    for (let i = 1; i < outline.length; i++) {
-        shape.lineTo(outline[i][0], outline[i][1]);
-    }
-
-    shape.lineTo(outline[0][0], outline[0][1]);
-
-    const geo = new THREE.ShapeGeometry(shape);
-    const floor = new THREE.Mesh(geo, mat);
+    const floor = new THREE.Mesh(floorGeo, floorMat);
     floor.rotation.x = -Math.PI / 2;
-    floor.position.y = 0;
+    floor.position.y = 0.5;
     floor.receiveShadow = true;
     scene.add(floor);
-}
 
-function createTileGrid(toWorld) {
-    if (!planData.building_outline || planData.building_outline.length < 3) return;
+    // === EXTERIOR WALLS (building outline) ===
+    const extWallMat = new THREE.MeshStandardMaterial({
+        color: 0x6a6e76,
+        roughness: 0.9,
+        metalness: 0.05
+    });
+    for (let i = 0; i < outlineWorld.length; i++) {
+        const p1 = outlineWorld[i];
+        const p2 = outlineWorld[(i + 1) % outlineWorld.length];
+        buildWall(p1, p2, WALL_HEIGHT, EXT_WALL_THICKNESS, extWallMat);
+    }
 
-    const outline = planData.building_outline.map(toWorld);
-    const xs = outline.map(p => p[0]);
-    const zs = outline.map(p => p[1]);
-
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minZ = Math.min(...zs);
-    const maxZ = Math.max(...zs);
-
-    const mat = new THREE.LineBasicMaterial({
-        color:0xffffff,
-        transparent:true,
-        opacity:0.24
+    // === INTERIOR WALLS from detected wall lines ===
+    const intWallMat = new THREE.MeshStandardMaterial({
+        color: 0x848890,
+        roughness: 0.88,
+        metalness: 0.03
     });
 
-    const step = 22;
-
-    for (let x = minX; x <= maxX; x += step) {
-        const geo = new THREE.BufferGeometry().setFromPoints([
-            new THREE.Vector3(x, 1.2, minZ),
-            new THREE.Vector3(x, 1.2, maxZ)
-        ]);
-        scene.add(new THREE.Line(geo, mat));
-    }
-
-    for (let z = minZ; z <= maxZ; z += step) {
-        const geo = new THREE.BufferGeometry().setFromPoints([
-            new THREE.Vector3(minX, 1.2, z),
-            new THREE.Vector3(maxX, 1.2, z)
-        ]);
-        scene.add(new THREE.Line(geo, mat));
-    }
-}
-
-function createExteriorWalls(toWorld, height, thickness, mat) {
-    if (!planData.building_outline || planData.building_outline.length < 3) return;
-
-    const outline = planData.building_outline.map(toWorld);
-
-    for (let i = 0; i < outline.length; i++) {
-        buildWall(outline[i], outline[(i + 1) % outline.length], height, thickness, mat);
-    }
-}
-
-function createInteriorWalls(toWorld, height, thickness, mat) {
-    (planData.rooms || []).forEach(room => {
-        const [x,y,w,h] = room.bbox;
-
-        const pts = [
-            toWorld([x,y]),
-            toWorld([x+w,y]),
-            toWorld([x+w,y+h]),
-            toWorld([x,y+h])
-        ];
-
-        for (let i = 0; i < 4; i++) {
-            buildWall(pts[i], pts[(i+1)%4], height * 0.92, thickness, mat);
-        }
-    });
-}
-
-function createWindows(toWorld, wallHeight) {
-    if (!planData.building_outline || planData.building_outline.length < 3) return;
-
-    const glassMat = new THREE.MeshStandardMaterial({
-        color:0x79aee8,
-        transparent:true,
-        opacity:0.55,
-        roughness:0.15,
-        metalness:0.1
+    (detectionData.walls || []).forEach(w => {
+        const p1 = pointToWorld(w.x1, w.y1);
+        const p2 = pointToWorld(w.x2, w.y2);
+        buildWall(p1, p2, WALL_HEIGHT * 0.92, INT_WALL_THICKNESS, intWallMat);
     });
 
-    const outline = planData.building_outline.map(toWorld);
-
-    for (let i = 0; i < outline.length; i++) {
-        const p1 = outline[i];
-        const p2 = outline[(i+1)%outline.length];
-
-        const dx = p2[0] - p1[0];
-        const dz = p2[1] - p1[1];
-        const len = Math.sqrt(dx*dx + dz*dz);
-
-        if (len < 120) continue;
-
-        const count = Math.floor(len / 115);
-
-        for (let j = 1; j <= count; j++) {
-            const t = j / (count + 1);
-            const x = p1[0] + dx * t;
-            const z = p1[1] + dz * t;
-            const angle = Math.atan2(dz, dx);
-
-            const geo = new THREE.BoxGeometry(34, 22, 2);
-            const win = new THREE.Mesh(geo, glassMat);
-            win.position.set(x, wallHeight * 0.58, z);
-            win.rotation.y = -angle;
-            scene.add(win);
-        }
-    }
-}
-
-function createDucts(toWorld, wallHeight) {
+    // === DUCTS - White metal sheet style ===
     const ductMat = new THREE.MeshStandardMaterial({
-        color:0xffffff,
-        roughness:0.2,
-        metalness:0.42,
-        emissive:0xffffff,
-        emissiveIntensity:0.08
+        color: 0xf8f8f8,
+        roughness: 0.35,
+        metalness: 0.55,
+        emissive: 0xffffff,
+        emissiveIntensity: 0.08
     });
 
-    (planData.ducts || []).forEach(duct => {
-        if (!duct.path || duct.path.length < 2) return;
+    (detectionData.ducts || []).forEach(d => {
+        // Each duct is a rectangle - turn into 3D box
+        const px = (d.x + d.w / 2) - cx;
+        const pz = (d.y + d.h / 2) - cy;
+        const length = Math.max(d.w, d.h);
+        const width = Math.min(d.w, d.h);
+        const angle = d.w >= d.h ? 0 : Math.PI / 2;
 
-        const path = duct.path.map(toWorld);
-
-        for (let i = 0; i < path.length - 1; i++) {
-            buildDuct(path[i], path[i+1], wallHeight + 8, ductMat);
-        }
-    });
-}
-
-function createVAVs(toWorld, wallHeight) {
-    const mat = new THREE.MeshStandardMaterial({
-        color:0x0b3b8f,
-        roughness:0.34,
-        metalness:0.28,
-        emissive:0x0b4dcc,
-        emissiveIntensity:0.18
+        const geo = new THREE.BoxGeometry(length, 14, Math.max(width, 16));
+        const mesh = new THREE.Mesh(geo, ductMat);
+        mesh.position.set(px, WALL_HEIGHT - 12, pz);
+        mesh.rotation.y = angle;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        scene.add(mesh);
     });
 
-    (planData.vavs || []).forEach(vav => {
-        const [x,z] = toWorld(vav.pos);
-        const geo = new THREE.BoxGeometry(32, 25, 32);
-        const box = new THREE.Mesh(geo, mat);
-        box.position.set(x, wallHeight + 8, z);
-        box.castShadow = true;
-        box.receiveShadow = true;
-        scene.add(box);
-    });
-}
-
-function createAHUs(toWorld, wallHeight) {
-    (planData.ahus || []).forEach((ahu, idx) => {
-        const [x,z] = toWorld(ahu.pos);
-        const sx = ahu.size ? Math.max(ahu.size[0], 62) : 72;
-        const sz = ahu.size ? Math.max(ahu.size[1], 50) : 56;
-
-        const mat = new THREE.MeshStandardMaterial({
-            color: idx === 0 ? 0x139b3a : 0x8b949e,
-            roughness:0.45,
-            metalness:0.24,
-            emissive: idx === 0 ? 0x0b6f2b : 0x000000,
-            emissiveIntensity: idx === 0 ? 0.14 : 0
-        });
-
-        const geo = new THREE.BoxGeometry(sx, 43, sz);
-        const unit = new THREE.Mesh(geo, mat);
-        unit.position.set(x, wallHeight + 8, z);
-        unit.castShadow = true;
-        unit.receiveShadow = true;
-        scene.add(unit);
-    });
-}
-
-function createDiffusers(toWorld, wallHeight) {
-    const mat = new THREE.MeshStandardMaterial({
-        color:0xffffff,
-        roughness:0.48,
-        metalness:0.18
+    // === VAV BOXES - Bright blue cubes ===
+    const vavMat = new THREE.MeshStandardMaterial({
+        color: 0x1e40af,
+        roughness: 0.45,
+        metalness: 0.35,
+        emissive: 0x1e3a8a,
+        emissiveIntensity: 0.18
     });
 
-    (planData.diffusers || []).forEach(diff => {
-        const [x,z] = toWorld(diff.pos);
-        const geo = new THREE.BoxGeometry(14, 3, 14);
-        const d = new THREE.Mesh(geo, mat);
-        d.position.set(x, wallHeight + 17, z);
-        d.castShadow = true;
-        scene.add(d);
+    (detectionData.vavs || []).forEach(v => {
+        const px = v.cx - cx;
+        const pz = v.cy - cy;
+        const size = Math.max(v.w, v.h, 28);
+        const geo = new THREE.BoxGeometry(size, size * 0.85, size);
+        const mesh = new THREE.Mesh(geo, vavMat);
+        mesh.position.set(px, WALL_HEIGHT - 22, pz);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        scene.add(mesh);
     });
+
+    // === AHU - Green main unit ===
+    (detectionData.ahus || []).forEach((a, idx) => {
+        const px = a.cx - cx;
+        const pz = a.cy - cy;
+        const ahuMat = idx === 0
+            ? new THREE.MeshStandardMaterial({
+                color: 0x16a34a,
+                roughness: 0.5,
+                metalness: 0.35,
+                emissive: 0x14532d,
+                emissiveIntensity: 0.18
+            })
+            : new THREE.MeshStandardMaterial({
+                color: 0x9ca3af,
+                roughness: 0.6,
+                metalness: 0.4
+            });
+        const w = Math.max(a.w, 50);
+        const d = Math.max(a.h, 40);
+        const geo = new THREE.BoxGeometry(w, 50, d);
+        const mesh = new THREE.Mesh(geo, ahuMat);
+        mesh.position.set(px, WALL_HEIGHT - 30, pz);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        scene.add(mesh);
+    });
+
+    // === Camera setup - low angle like Synchrony render ===
+    const maxSize = Math.max(sizeX, sizeZ);
+    const distance = maxSize * 1.3;
+    camera.position.set(0, distance * 0.45, distance * 0.95);
+    initialCameraPos = camera.position.clone();
+    initialTarget = new THREE.Vector3(0, WALL_HEIGHT * 0.4, 0);
+    controls.target.copy(initialTarget);
+    controls.update();
 }
 
 function buildWall(p1, p2, height, thickness, material) {
     const dx = p2[0] - p1[0];
     const dz = p2[1] - p1[1];
-    const len = Math.sqrt(dx*dx + dz*dz);
-
-    if (len < 2) return;
+    const length = Math.sqrt(dx * dx + dz * dz);
+    if (length < 5) return;
 
     const angle = Math.atan2(dz, dx);
     const cx = (p1[0] + p2[0]) / 2;
     const cz = (p1[1] + p2[1]) / 2;
 
-    const geo = new THREE.BoxGeometry(len, height, thickness);
+    const geo = new THREE.BoxGeometry(length, height, thickness);
     const mesh = new THREE.Mesh(geo, material);
-
-    mesh.position.set(cx, height/2, cz);
+    mesh.position.set(cx, height / 2, cz);
     mesh.rotation.y = -angle;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
-
     scene.add(mesh);
-}
-
-function buildDuct(p1, p2, y, material) {
-    const dx = p2[0] - p1[0];
-    const dz = p2[1] - p1[1];
-    const len = Math.sqrt(dx*dx + dz*dz);
-
-    if (len < 2) return;
-
-    const angle = Math.atan2(dz, dx);
-    const cx = (p1[0] + p2[0]) / 2;
-    const cz = (p1[1] + p2[1]) / 2;
-
-    const geo = new THREE.BoxGeometry(len, 14, 19);
-    const duct = new THREE.Mesh(geo, material);
-
-    duct.position.set(cx, y, cz);
-    duct.rotation.y = -angle;
-    duct.castShadow = true;
-    duct.receiveShadow = true;
-
-    scene.add(duct);
 }
 
 function animate() {
@@ -680,9 +624,11 @@ function animate() {
 
 function onResize() {
     const container = document.getElementById('viewer');
-    camera.aspect = container.clientWidth / container.clientHeight;
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    camera.aspect = width / height;
     camera.updateProjectionMatrix();
-    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setSize(width, height);
 }
 
 function resetView() {
@@ -691,10 +637,18 @@ function resetView() {
     controls.update();
 }
 
-function flatView() {
+function topView() {
     const maxSize = Math.max(buildingCenter.sizeX, buildingCenter.sizeZ);
-    camera.position.set(maxSize * 0.42, maxSize * 0.45, maxSize * 0.90);
-    controls.target.set(0, 25, 0);
+    camera.position.set(0, maxSize * 1.4, 0.1);
+    controls.target.set(0, 0, 0);
+    controls.update();
+}
+
+function frontView() {
+    const maxSize = Math.max(buildingCenter.sizeX, buildingCenter.sizeZ);
+    const distance = maxSize * 1.5;
+    camera.position.set(0, distance * 0.35, distance);
+    controls.target.set(0, 30, 0);
     controls.update();
 }
 
@@ -702,7 +656,7 @@ function screenshot() {
     renderer.render(scene, camera);
     const dataURL = renderer.domElement.toDataURL('image/png');
     const link = document.createElement('a');
-    link.download = 'bas_graphic_3d_v14.png';
+    link.download = 'bas_graphic_3d.png';
     link.href = dataURL;
     link.click();
 }
@@ -710,7 +664,7 @@ function screenshot() {
 init();
 </script>
 </body>
-</html>"""
+</html>'''
 
 
 @app.route("/")
@@ -730,36 +684,44 @@ def generate():
         file.save(UPLOAD_IMAGE_PATH)
 
     img = cv2.imread(UPLOAD_IMAGE_PATH)
-
     if img is None:
         return "Error loading image", 400
 
     h, w = img.shape[:2]
-
     if h > w:
         img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-
     cv2.imwrite(UPLOAD_IMAGE_PATH, img)
 
     try:
-        plan_data = analyze_plan_with_claude(UPLOAD_IMAGE_PATH)
+        # Color-based HVAC detection (no AI - free, fast, precise)
+        hvac_data = detect_hvac_components(UPLOAD_IMAGE_PATH)
+
+        # Wall and room detection
+        arch_data = detect_walls(UPLOAD_IMAGE_PATH)
+
+        # Combine into single detection result
+        detection = {
+            "image_width": hvac_data["image_width"],
+            "image_height": hvac_data["image_height"],
+            "vavs": hvac_data["vavs"],
+            "ahus": hvac_data["ahus"],
+            "ducts": hvac_data["ducts"],
+            "walls": arch_data["walls"],
+            "rooms": arch_data["rooms"],
+            "building_outline": arch_data["building_outline"]
+        }
+
     except Exception as e:
         error_msg = str(e)
-        return (
-            "<h2 style='color:white;background:#0d0f14;padding:30px;'>"
-            "AI analysis failed: "
-            + error_msg
-            + "</h2>"
-        ), 500
+        return "<h2 style='color:white;background:#0d0f14;padding:30px;'>Detection failed: " + error_msg + "</h2>", 500
 
     return render_template_string(
         RESULT_PAGE,
-        plan_data_json=json.dumps(plan_data),
-        n_rooms=len(plan_data.get("rooms", [])),
-        n_vavs=len(plan_data.get("vavs", [])),
-        n_ahus=len(plan_data.get("ahus", [])),
-        n_ducts=len(plan_data.get("ducts", [])),
-        n_diffs=len(plan_data.get("diffusers", [])),
+        detection_json=json.dumps(detection),
+        n_vavs=len(detection["vavs"]),
+        n_ahus=len(detection["ahus"]),
+        n_ducts=len(detection["ducts"]),
+        n_rooms=len(detection["rooms"])
     )
 
 
