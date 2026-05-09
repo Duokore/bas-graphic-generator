@@ -2,11 +2,8 @@ from flask import Flask, request, render_template_string, jsonify
 import os
 import base64
 import json
-import math
 import cv2
-import numpy as np
 import fitz
-from io import BytesIO
 
 app = Flask(__name__)
 
@@ -14,16 +11,9 @@ UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
 UPLOAD_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_upload.png")
 UPLOAD_PDF_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_upload.pdf")
-MARKED_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_marked.png")
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-
-MIN_VAV_AREA = 40
-MAX_VAV_AREA = 4000
-MIN_AHU_AREA = 200
-MAX_DISTANCE_TO_DUCT = 200
-TARGET_VAVS = 30
 
 
 def image_to_base64(path):
@@ -39,144 +29,10 @@ def pdf_to_png(pdf_path, out_path):
     doc.close()
 
 
-def clean_mask(mask, iterations=2):
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=iterations)
-    mask = cv2.dilate(mask, kernel, iterations=1)
-    return mask
-
-
-def get_contours(mask):
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return contours
-
-
-def contour_center(cnt):
-    x, y, w, h = cv2.boundingRect(cnt)
-    return (int(x + w / 2), int(y + h / 2))
-
-
-def distance_to_nearest_duct(center, ducts):
-    cx, cy = center
-    best = 999999
-    for d in ducts:
-        x, y, w, h = d["x"], d["y"], d["w"], d["h"]
-        pts = [(x, y), (x + w, y), (x, y + h), (x + w, y + h), (x + w // 2, y + h // 2)]
-        for px, py in pts:
-            dist = math.hypot(cx - px, cy - py)
-            if dist < best:
-                best = dist
-    return best
-
-
-def detect_all_components(image_path):
-    """Detect VAVs (blue), AHU (green), Ducts (red), Exterior walls (purple/magenta), Interior walls (orange)"""
-    img = cv2.imread(image_path)
-    img_h, img_w = img.shape[:2]
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-    # === RED DUCTS ===
-    red1 = cv2.inRange(hsv, np.array([0, 60, 60]), np.array([10, 255, 255]))
-    red2 = cv2.inRange(hsv, np.array([170, 60, 60]), np.array([180, 255, 255]))
-    red_mask = clean_mask(cv2.bitwise_or(red1, red2), 1)
-
-    ducts = []
-    for cnt in get_contours(red_mask):
-        area = cv2.contourArea(cnt)
-        if area < 40:
-            continue
-        x, y, w, h = cv2.boundingRect(cnt)
-        ratio = max(w, h) / max(min(w, h), 1)
-        if ratio > 1.8:
-            ducts.append({"x": int(x), "y": int(y), "w": int(w), "h": int(h)})
-
-    # === BLUE VAVs ===
-    blue_mask = cv2.inRange(hsv, np.array([90, 60, 60]), np.array([140, 255, 255]))
-    blue_mask = clean_mask(blue_mask, 1)
-
-    vavs = []
-    for cnt in get_contours(blue_mask):
-        area = cv2.contourArea(cnt)
-        if area < MIN_VAV_AREA or area > MAX_VAV_AREA:
-            continue
-        x, y, w, h = cv2.boundingRect(cnt)
-        center = contour_center(cnt)
-        dist = distance_to_nearest_duct(center, ducts) if ducts else 0
-        if ducts and dist > MAX_DISTANCE_TO_DUCT:
-            continue
-        vavs.append({
-            "x": int(x), "y": int(y), "w": int(w), "h": int(h),
-            "cx": center[0], "cy": center[1],
-            "distance_to_duct": dist
-        })
-
-    vavs = sorted(vavs, key=lambda v: v["distance_to_duct"])[:TARGET_VAVS]
-
-    # === GREEN AHU ===
-    green_mask = cv2.inRange(hsv, np.array([40, 60, 60]), np.array([85, 255, 255]))
-    green_mask = clean_mask(green_mask, 1)
-
-    ahus = []
-    for cnt in get_contours(green_mask):
-        area = cv2.contourArea(cnt)
-        if area < MIN_AHU_AREA:
-            continue
-        x, y, w, h = cv2.boundingRect(cnt)
-        cx_a = int(x + w / 2)
-        cy_a = int(y + h / 2)
-        ahus.append({"x": int(x), "y": int(y), "w": int(w), "h": int(h), "cx": cx_a, "cy": cy_a, "area": float(area)})
-
-    ahus = sorted(ahus, key=lambda a: a["area"], reverse=True)[:1]
-
-    # === PURPLE/MAGENTA EXTERIOR WALLS ===
-    purple_mask = cv2.inRange(hsv, np.array([140, 60, 60]), np.array([170, 255, 255]))
-    purple_mask = clean_mask(purple_mask, 1)
-
-    ext_walls = extract_wall_lines(purple_mask)
-
-    # === ORANGE INTERIOR WALLS ===
-    orange_mask = cv2.inRange(hsv, np.array([10, 100, 100]), np.array([25, 255, 255]))
-    orange_mask = clean_mask(orange_mask, 1)
-
-    int_walls = extract_wall_lines(orange_mask)
-
-    return {
-        "image_width": img_w,
-        "image_height": img_h,
-        "ducts": ducts,
-        "vavs": vavs,
-        "ahus": ahus,
-        "exterior_walls": ext_walls,
-        "interior_walls": int_walls
-    }
-
-
-def extract_wall_lines(mask):
-    """Convert wall mask into line segments using skeleton + contour analysis"""
-    # Dilate to connect close strokes
-    kernel = np.ones((5, 5), np.uint8)
-    dilated = cv2.dilate(mask, kernel, iterations=2)
-
-    # Find contours
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    walls = []
-    for cnt in contours:
-        if cv2.contourArea(cnt) < 100:
-            continue
-        # Approximate contour to a polyline
-        epsilon = 0.005 * cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
-        points = [[int(p[0][0]), int(p[0][1])] for p in approx]
-        if len(points) >= 2:
-            walls.append({"points": points})
-    return walls
-
-
 HOME_PAGE = '''<!DOCTYPE html>
 <html>
 <head>
-<title>BAS Generator v15 - Visual Editor</title>
+<title>BAS Generator v16 - CAD Editor</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
@@ -192,26 +48,27 @@ input[type=file] { background: transparent; color: #aab0c4; border: none; font-s
 .feature { background: #13151d; border: 1px solid #2a3050; border-radius: 12px; padding: 14px; margin: 8px 0; text-align: left; font-size: 13px; color: #aab0c4; display: flex; gap: 10px; align-items: center; }
 .color-dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
 .footer { color: #3a4060; font-size: 12px; margin-top: 28px; }
+.badge { display: inline-block; background: linear-gradient(135deg, #ff9800, #ff5722); color: white; padding: 4px 12px; font-size: 11px; border-radius: 8px; margin-left: 6px; }
 </style>
 </head>
 <body>
 <div class="card">
-<div class="logo">&#127970;</div>
-<h1>BAS Graphic Generator v15</h1>
-<p class="sub">Visual Editor + 3D Render Engine</p>
+<div class="logo">&#128221;</div>
+<h1>BAS Generator v16 <span class="badge">CAD MODE</span></h1>
+<p class="sub">Click-to-draw polyline walls + click-to-place equipment</p>
 <div style="text-align: left; margin-bottom: 24px;">
-<div class="feature"><div class="color-dot" style="background:#1e40af"></div> Mark VAVs in BLUE</div>
-<div class="feature"><div class="color-dot" style="background:#16a34a"></div> Mark AHU in GREEN</div>
-<div class="feature"><div class="color-dot" style="background:#dc2626"></div> Mark Ducts in RED</div>
-<div class="feature"><div class="color-dot" style="background:#9333ea"></div> Trace EXTERIOR walls in PURPLE</div>
-<div class="feature"><div class="color-dot" style="background:#ea580c"></div> Trace INTERIOR walls in ORANGE</div>
+<div class="feature"><div class="color-dot" style="background:#9333ea"></div> POLYLINE walls (click corners, double-click to finish)</div>
+<div class="feature"><div class="color-dot" style="background:#1e40af"></div> Click to place VAVs</div>
+<div class="feature"><div class="color-dot" style="background:#16a34a"></div> Click to place AHU</div>
+<div class="feature"><div class="color-dot" style="background:#dc2626"></div> Click 2 points for duct lines</div>
+<div class="feature"><div class="color-dot" style="background:#888"></div> Edit/move anything after drawing</div>
 </div>
 <form action="/upload" method="post" enctype="multipart/form-data">
 <div class="zone">
 <input type="file" name="file" accept="image/png,image/jpeg,application/pdf" required>
-<span class="lbl">Upload original mechanical plan (no marking needed)</span>
+<span class="lbl">Upload original mechanical plan</span>
 </div>
-<button class="btn" type="submit">Open Visual Editor</button>
+<button class="btn" type="submit">Open CAD Editor</button>
 </form>
 <div class="footer">Made by Paolo V. and Emmanuel R.</div>
 </div>
@@ -222,100 +79,127 @@ input[type=file] { background: transparent; color: #aab0c4; border: none; font-s
 EDITOR_PAGE = '''<!DOCTYPE html>
 <html>
 <head>
-<title>Visual Editor</title>
+<title>CAD Editor</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; padding: 12px; height: 100vh; display: flex; flex-direction: column; }
-.topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-h1 { font-size: 18px; background: linear-gradient(135deg, #2d89ef, #b388ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-.toolbar { background: #181b24; border: 1px solid #252a38; border-radius: 12px; padding: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
-.tool-btn { padding: 8px 14px; border: 2px solid transparent; background: #1e2233; color: white; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; padding: 8px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+.topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+h1 { font-size: 16px; background: linear-gradient(135deg, #2d89ef, #b388ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.toolbar { background: #181b24; border: 1px solid #252a38; border-radius: 10px; padding: 8px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+.tool-btn { padding: 8px 12px; border: 2px solid transparent; background: #1e2233; color: white; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .tool-btn:hover { background: #252a38; }
-.tool-btn.active { border-color: #fff; }
-.color-swatch { width: 16px; height: 16px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.3); }
-.divider { width: 1px; background: #333; height: 28px; margin: 0 4px; }
-.size-control { display: flex; align-items: center; gap: 8px; padding: 4px 12px; background: #1e2233; border-radius: 8px; }
-.size-control input { width: 80px; }
-.canvas-wrap { flex: 1; position: relative; background: #000; border-radius: 12px; border: 1px solid #2a3050; overflow: hidden; }
-#canvasContainer { width: 100%; height: 100%; position: relative; overflow: auto; cursor: crosshair; }
+.tool-btn.active { border-color: #fff; background: #2d3348; }
+.color-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.3); }
+.divider { width: 1px; background: #333; height: 24px; margin: 0 3px; }
+.canvas-wrap { flex: 1; position: relative; background: #1a1a1a; border-radius: 10px; border: 1px solid #2a3050; overflow: hidden; }
+#canvasContainer { width: 100%; height: 100%; position: relative; overflow: auto; }
 canvas { display: block; }
-.action-btn { padding: 10px 22px; border: none; border-radius: 10px; font-size: 14px; font-weight: 700; cursor: pointer; }
+.action-btn { padding: 8px 16px; border: none; border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; }
 .btn-green { background: #16a34a; color: white; }
 .btn-blue { background: #1a6fd4; color: white; }
 .btn-red { background: #dc2626; color: white; }
 .btn-gray { background: #333; color: white; }
-.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+.spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none; align-items: center; justify-content: center; z-index: 100; flex-direction: column; gap: 16px; }
 .loading-overlay.active { display: flex; }
-.hint { font-size: 12px; color: #888; padding: 6px 12px; }
+.hint { font-size: 11px; color: #888; padding: 4px 8px; background: rgba(255,255,255,0.05); border-radius: 6px; }
+.status { padding: 4px 12px; background: #1e2233; border-radius: 6px; font-size: 11px; color: #aab0c4; min-width: 200px; text-align: center; }
+.cursor-cross { cursor: crosshair; }
+.cursor-move { cursor: move; }
+.cursor-default { cursor: default; }
 </style>
 </head>
 <body>
 <div class="topbar">
-<h1>Visual Editor - Mark your plan</h1>
-<div style="display: flex; gap: 8px;">
-<button onclick="undo()" class="action-btn btn-gray">&#9100; Undo</button>
-<button onclick="clearAll()" class="action-btn btn-red">Clear All</button>
+<h1>CAD Editor &mdash; Click points to draw</h1>
+<div style="display: flex; gap: 6px;">
+<button onclick="undo()" class="action-btn btn-gray">&#8617; Undo</button>
+<button onclick="clearAll()" class="action-btn btn-red">Clear</button>
 <button onclick="generate3D()" class="action-btn btn-green">Generate 3D &rarr;</button>
 </div>
 </div>
 
 <div class="toolbar">
-<button class="tool-btn active" data-color="#1e40af" data-name="vav" onclick="selectTool(this)">
-<div class="color-swatch" style="background:#1e40af"></div> VAV (Blue)
+<button class="tool-btn active" data-tool="extwall" onclick="selectTool(this)">
+<div class="color-swatch" style="background:#9333ea"></div> Ext Wall
 </button>
-<button class="tool-btn" data-color="#16a34a" data-name="ahu" onclick="selectTool(this)">
-<div class="color-swatch" style="background:#16a34a"></div> AHU (Green)
+<button class="tool-btn" data-tool="intwall" onclick="selectTool(this)">
+<div class="color-swatch" style="background:#ea580c"></div> Int Wall
 </button>
-<button class="tool-btn" data-color="#dc2626" data-name="duct" onclick="selectTool(this)">
-<div class="color-swatch" style="background:#dc2626"></div> Duct (Red)
-</button>
-<button class="tool-btn" data-color="#9333ea" data-name="extwall" onclick="selectTool(this)">
-<div class="color-swatch" style="background:#9333ea"></div> Ext Wall (Purple)
-</button>
-<button class="tool-btn" data-color="#ea580c" data-name="intwall" onclick="selectTool(this)">
-<div class="color-swatch" style="background:#ea580c"></div> Int Wall (Orange)
+<button class="tool-btn" data-tool="duct" onclick="selectTool(this)">
+<div class="color-swatch" style="background:#dc2626"></div> Duct Line
 </button>
 
 <div class="divider"></div>
 
-<div class="size-control">
-<span style="font-size:12px;color:#aab0c4;">Brush:</span>
-<input type="range" id="brushSize" min="3" max="40" value="10">
-<span id="brushVal" style="font-size:12px;color:white;width:20px;">10</span>
-</div>
+<button class="tool-btn" data-tool="vav" onclick="selectTool(this)">
+<div class="color-swatch" style="background:#1e40af"></div> VAV
+</button>
+<button class="tool-btn" data-tool="ahu" onclick="selectTool(this)">
+<div class="color-swatch" style="background:#16a34a"></div> AHU
+</button>
+<button class="tool-btn" data-tool="diffuser" onclick="selectTool(this)">
+<div class="color-swatch" style="background:#fff"></div> Diffuser
+</button>
 
 <div class="divider"></div>
 
-<span class="hint">&#128161; Click+drag to draw | For VAV/AHU click once</span>
+<button class="tool-btn" data-tool="move" onclick="selectTool(this)">&#9874; Move</button>
+<button class="tool-btn" data-tool="delete" onclick="selectTool(this)">&#128465; Delete</button>
+
+<div class="divider"></div>
+
+<span class="status" id="statusBar">Click to start a wall. Double-click to finish.</span>
 </div>
 
 <div class="canvas-wrap">
 <div id="canvasContainer">
 <canvas id="bgCanvas" style="position:absolute;top:0;left:0;"></canvas>
-<canvas id="drawCanvas" style="position:absolute;top:0;left:0;"></canvas>
+<canvas id="drawCanvas" class="cursor-cross" style="position:absolute;top:0;left:0;"></canvas>
 </div>
 </div>
 
 <div class="loading-overlay" id="loading">
 <div class="spinner"></div>
-<div style="color:white;font-size:14px;">Detecting components and building 3D...</div>
+<div style="color:white;font-size:14px;">Building 3D model...</div>
 </div>
 
 <script>
 const imgB64 = '{{ image_b64 }}';
+
 let bgCanvas = document.getElementById('bgCanvas');
 let drawCanvas = document.getElementById('drawCanvas');
 let bgCtx = bgCanvas.getContext('2d');
 let drawCtx = drawCanvas.getContext('2d');
 
-let currentTool = 'vav';
-let currentColor = '#1e40af';
-let brushSize = 10;
-let drawing = false;
-let lastX = 0, lastY = 0;
+let currentTool = 'extwall';
+let elements = [];
 let history = [];
+let currentPolyline = null;
+let hoverPoint = null;
+let selectedElement = null;
+let dragOffset = null;
+
+const COLORS = {
+    extwall: '#9333ea',
+    intwall: '#ea580c',
+    duct: '#dc2626',
+    vav: '#1e40af',
+    ahu: '#16a34a',
+    diffuser: '#ffffff'
+};
+
+const STATUS_TEXTS = {
+    extwall: 'Click corners of the BUILDING PERIMETER. Double-click to close polygon.',
+    intwall: 'Click corners of an INTERIOR WALL. Double-click to finish.',
+    duct: 'Click TWO points for a duct line. Click again for next duct.',
+    vav: 'Click to place a VAV (blue cube).',
+    ahu: 'Click to place the AHU (green box).',
+    diffuser: 'Click to place a diffuser (white square).',
+    move: 'Click and drag any element to move it.',
+    delete: 'Click any element to delete it.'
+};
 
 const img = new Image();
 img.onload = function() {
@@ -325,20 +209,32 @@ img.onload = function() {
     drawCanvas.height = img.height;
     bgCtx.drawImage(img, 0, 0);
     saveState();
+    redraw();
 };
 img.src = 'data:image/png;base64,' + imgB64;
 
 function selectTool(btn) {
     document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    currentTool = btn.dataset.name;
-    currentColor = btn.dataset.color;
-}
+    currentTool = btn.dataset.tool;
+    document.getElementById('statusBar').textContent = STATUS_TEXTS[currentTool] || '';
 
-document.getElementById('brushSize').addEventListener('input', function(e) {
-    brushSize = parseInt(e.target.value);
-    document.getElementById('brushVal').textContent = brushSize;
-});
+    // Reset polyline if switching tools
+    if (currentPolyline) {
+        if (currentPolyline.points.length >= 2) {
+            elements.push(currentPolyline);
+        }
+        currentPolyline = null;
+        saveState();
+    }
+
+    drawCanvas.className = '';
+    if (currentTool === 'move') drawCanvas.classList.add('cursor-move');
+    else if (currentTool === 'delete') drawCanvas.classList.add('cursor-default');
+    else drawCanvas.classList.add('cursor-cross');
+
+    redraw();
+}
 
 function getMousePos(e) {
     const rect = drawCanvas.getBoundingClientRect();
@@ -350,96 +246,282 @@ function getMousePos(e) {
     };
 }
 
-drawCanvas.addEventListener('mousedown', function(e) {
-    drawing = true;
+drawCanvas.addEventListener('click', function(e) {
     const pos = getMousePos(e);
-    lastX = pos.x;
-    lastY = pos.y;
 
-    // Single click for VAV/AHU - draw filled circle
-    if (currentTool === 'vav') {
-        drawCtx.fillStyle = currentColor;
-        drawCtx.beginPath();
-        drawCtx.arc(pos.x, pos.y, 10, 0, Math.PI * 2);
-        drawCtx.fill();
-        drawing = false;
+    if (currentTool === 'delete') {
+        const idx = findElementAt(pos);
+        if (idx !== -1) {
+            elements.splice(idx, 1);
+            saveState();
+            redraw();
+        }
+        return;
+    }
+
+    if (currentTool === 'move') {
+        return;
+    }
+
+    // Single-point tools
+    if (currentTool === 'vav' || currentTool === 'ahu' || currentTool === 'diffuser') {
+        elements.push({ type: currentTool, x: pos.x, y: pos.y });
         saveState();
-    } else if (currentTool === 'ahu') {
-        drawCtx.fillStyle = currentColor;
-        drawCtx.fillRect(pos.x - 18, pos.y - 14, 36, 28);
-        drawing = false;
+        redraw();
+        return;
+    }
+
+    // Polyline tools (extwall, intwall)
+    if (currentTool === 'extwall' || currentTool === 'intwall') {
+        if (!currentPolyline) {
+            currentPolyline = { type: currentTool, points: [{ x: pos.x, y: pos.y }] };
+        } else {
+            currentPolyline.points.push({ x: pos.x, y: pos.y });
+        }
+        redraw();
+        return;
+    }
+
+    // Duct line - 2 clicks make a line
+    if (currentTool === 'duct') {
+        if (!currentPolyline) {
+            currentPolyline = { type: 'duct', points: [{ x: pos.x, y: pos.y }] };
+        } else {
+            currentPolyline.points.push({ x: pos.x, y: pos.y });
+            elements.push(currentPolyline);
+            currentPolyline = null;
+            saveState();
+        }
+        redraw();
+        return;
+    }
+});
+
+drawCanvas.addEventListener('dblclick', function(e) {
+    if (currentPolyline && currentPolyline.points.length >= 2) {
+        // For exterior walls, close the polygon
+        if (currentPolyline.type === 'extwall' && currentPolyline.points.length >= 3) {
+            currentPolyline.closed = true;
+        }
+        elements.push(currentPolyline);
+        currentPolyline = null;
         saveState();
-    } else {
-        // Walls and ducts - start a stroke
-        drawCtx.strokeStyle = currentColor;
-        drawCtx.lineWidth = brushSize;
-        drawCtx.lineCap = 'round';
-        drawCtx.lineJoin = 'round';
-        drawCtx.beginPath();
-        drawCtx.moveTo(pos.x, pos.y);
+        redraw();
     }
 });
 
 drawCanvas.addEventListener('mousemove', function(e) {
-    if (!drawing) return;
     const pos = getMousePos(e);
-    drawCtx.lineTo(pos.x, pos.y);
-    drawCtx.stroke();
+    hoverPoint = pos;
+
+    if (currentTool === 'move' && selectedElement && dragOffset) {
+        moveElement(selectedElement, pos.x - dragOffset.x, pos.y - dragOffset.y);
+        redraw();
+        return;
+    }
+
+    if (currentPolyline) {
+        redraw();
+    }
+});
+
+drawCanvas.addEventListener('mousedown', function(e) {
+    if (currentTool !== 'move') return;
+    const pos = getMousePos(e);
+    const idx = findElementAt(pos);
+    if (idx !== -1) {
+        selectedElement = elements[idx];
+        const center = getElementCenter(selectedElement);
+        dragOffset = { x: pos.x - center.x, y: pos.y - center.y };
+    }
 });
 
 drawCanvas.addEventListener('mouseup', function() {
-    if (drawing) {
+    if (selectedElement) {
         saveState();
+        selectedElement = null;
+        dragOffset = null;
     }
-    drawing = false;
 });
 
-drawCanvas.addEventListener('mouseleave', function() {
-    drawing = false;
+// Cancel current polyline with Escape
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && currentPolyline) {
+        currentPolyline = null;
+        redraw();
+    }
 });
+
+function findElementAt(pos) {
+    for (let i = elements.length - 1; i >= 0; i--) {
+        const el = elements[i];
+        if (el.type === 'vav' || el.type === 'ahu' || el.type === 'diffuser') {
+            const dx = pos.x - el.x;
+            const dy = pos.y - el.y;
+            if (Math.sqrt(dx * dx + dy * dy) < 25) return i;
+        } else {
+            // Check polyline
+            for (const p of el.points) {
+                const dx = pos.x - p.x;
+                const dy = pos.y - p.y;
+                if (Math.sqrt(dx * dx + dy * dy) < 15) return i;
+            }
+        }
+    }
+    return -1;
+}
+
+function getElementCenter(el) {
+    if (el.type === 'vav' || el.type === 'ahu' || el.type === 'diffuser') {
+        return { x: el.x, y: el.y };
+    }
+    let sx = 0, sy = 0;
+    for (const p of el.points) { sx += p.x; sy += p.y; }
+    return { x: sx / el.points.length, y: sy / el.points.length };
+}
+
+function moveElement(el, dx, dy) {
+    if (el.type === 'vav' || el.type === 'ahu' || el.type === 'diffuser') {
+        el.x += dx;
+        el.y += dy;
+    } else {
+        for (const p of el.points) { p.x += dx; p.y += dy; }
+    }
+}
+
+function redraw() {
+    drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+
+    // Draw all completed elements
+    for (const el of elements) {
+        drawElement(el);
+    }
+
+    // Draw current polyline being created
+    if (currentPolyline) {
+        drawElement(currentPolyline, true);
+        // Draw rubber-band line to mouse
+        if (hoverPoint && currentPolyline.points.length > 0) {
+            const last = currentPolyline.points[currentPolyline.points.length - 1];
+            drawCtx.strokeStyle = COLORS[currentPolyline.type];
+            drawCtx.lineWidth = 3;
+            drawCtx.setLineDash([8, 6]);
+            drawCtx.beginPath();
+            drawCtx.moveTo(last.x, last.y);
+            drawCtx.lineTo(hoverPoint.x, hoverPoint.y);
+            drawCtx.stroke();
+            drawCtx.setLineDash([]);
+        }
+    }
+}
+
+function drawElement(el, isInProgress = false) {
+    const color = COLORS[el.type] || '#fff';
+
+    if (el.type === 'vav') {
+        drawCtx.fillStyle = color;
+        drawCtx.strokeStyle = '#fff';
+        drawCtx.lineWidth = 2;
+        drawCtx.beginPath();
+        drawCtx.arc(el.x, el.y, 14, 0, Math.PI * 2);
+        drawCtx.fill();
+        drawCtx.stroke();
+        return;
+    }
+
+    if (el.type === 'ahu') {
+        drawCtx.fillStyle = color;
+        drawCtx.strokeStyle = '#fff';
+        drawCtx.lineWidth = 2;
+        drawCtx.fillRect(el.x - 24, el.y - 18, 48, 36);
+        drawCtx.strokeRect(el.x - 24, el.y - 18, 48, 36);
+        return;
+    }
+
+    if (el.type === 'diffuser') {
+        drawCtx.fillStyle = color;
+        drawCtx.strokeStyle = '#666';
+        drawCtx.lineWidth = 1;
+        drawCtx.fillRect(el.x - 8, el.y - 8, 16, 16);
+        drawCtx.strokeRect(el.x - 8, el.y - 8, 16, 16);
+        return;
+    }
+
+    // Polyline
+    if (!el.points || el.points.length === 0) return;
+
+    drawCtx.strokeStyle = color;
+    drawCtx.lineWidth = el.type === 'duct' ? 4 : 5;
+    drawCtx.lineCap = 'round';
+    drawCtx.lineJoin = 'round';
+    drawCtx.beginPath();
+    drawCtx.moveTo(el.points[0].x, el.points[0].y);
+    for (let i = 1; i < el.points.length; i++) {
+        drawCtx.lineTo(el.points[i].x, el.points[i].y);
+    }
+    if (el.closed) {
+        drawCtx.closePath();
+    }
+    drawCtx.stroke();
+
+    // Draw vertices
+    drawCtx.fillStyle = color;
+    for (const p of el.points) {
+        drawCtx.beginPath();
+        drawCtx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+        drawCtx.fill();
+    }
+
+    // First point gets ring if in progress
+    if (isInProgress && el.points.length > 0) {
+        const first = el.points[0];
+        drawCtx.strokeStyle = '#fff';
+        drawCtx.lineWidth = 2;
+        drawCtx.beginPath();
+        drawCtx.arc(first.x, first.y, 8, 0, Math.PI * 2);
+        drawCtx.stroke();
+    }
+}
 
 function saveState() {
-    history.push(drawCanvas.toDataURL());
-    if (history.length > 30) history.shift();
+    history.push(JSON.stringify(elements));
+    if (history.length > 40) history.shift();
 }
 
 function undo() {
     if (history.length < 2) return;
     history.pop();
-    const prev = history[history.length - 1];
-    const tmpImg = new Image();
-    tmpImg.onload = function() {
-        drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-        drawCtx.drawImage(tmpImg, 0, 0);
-    };
-    tmpImg.src = prev;
+    elements = JSON.parse(history[history.length - 1]);
+    currentPolyline = null;
+    redraw();
 }
 
 function clearAll() {
-    if (!confirm('Clear all markings?')) return;
-    drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-    history = [];
+    if (!confirm('Clear everything?')) return;
+    elements = [];
+    currentPolyline = null;
     saveState();
+    redraw();
 }
 
 async function generate3D() {
+    // Add current polyline if it has at least 2 points
+    if (currentPolyline && currentPolyline.points.length >= 2) {
+        elements.push(currentPolyline);
+        currentPolyline = null;
+    }
+
     document.getElementById('loading').classList.add('active');
-
-    // Composite both canvases into one
-    const finalCanvas = document.createElement('canvas');
-    finalCanvas.width = bgCanvas.width;
-    finalCanvas.height = bgCanvas.height;
-    const fctx = finalCanvas.getContext('2d');
-    fctx.drawImage(bgCanvas, 0, 0);
-    fctx.drawImage(drawCanvas, 0, 0);
-
-    const dataUrl = finalCanvas.toDataURL('image/png');
 
     try {
         const response = await fetch('/process', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image: dataUrl })
+            body: JSON.stringify({
+                elements: elements,
+                imageWidth: drawCanvas.width,
+                imageHeight: drawCanvas.height
+            })
         });
         const result = await response.json();
         if (result.success) {
@@ -489,6 +571,7 @@ h1 { text-align: center; font-size: 22px; margin-bottom: 4px; background: linear
 <div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
 <div class="stat">AHUs: <b>{{ n_ahus }}</b></div>
 <div class="stat">Ducts: <b>{{ n_ducts }}</b></div>
+<div class="stat">Diffusers: <b>{{ n_diffs }}</b></div>
 <div class="stat">Ext Walls: <b>{{ n_ext }}</b></div>
 <div class="stat">Int Walls: <b>{{ n_int }}</b></div>
 </div>
@@ -519,11 +602,9 @@ function init() {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     c.appendChild(renderer.domElement);
-
     controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
-
     setupLighting();
     buildScene();
     window.addEventListener('resize', onResize);
@@ -546,9 +627,7 @@ function setupLighting() {
     key.shadow.camera.bottom = -2000;
     key.shadow.bias = -0.0008;
     scene.add(key);
-    const fill = new THREE.DirectionalLight(0xffffff, 0.35);
-    fill.position.set(-500, 800, -300);
-    scene.add(fill);
+    scene.add(new THREE.DirectionalLight(0xffffff, 0.35));
 }
 
 function buildScene() {
@@ -576,82 +655,114 @@ function buildScene() {
     tex.wrapT = THREE.RepeatWrapping;
     tex.repeat.set(sizeX / 80, sizeZ / 80);
 
-    const floorGeo = new THREE.PlaneGeometry(sizeX, sizeZ);
-    const floor = new THREE.Mesh(floorGeo, new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85 }));
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = 0.5;
-    floor.receiveShadow = true;
-    scene.add(floor);
+    // Use exterior wall as floor shape if available
+    const extWalls = (data.elements || []).filter(e => e.type === 'extwall');
+    if (extWalls.length > 0 && extWalls[0].points && extWalls[0].points.length >= 3) {
+        const shape = new THREE.Shape();
+        const pts = extWalls[0].points;
+        shape.moveTo(pts[0].x - cx, pts[0].y - cy);
+        for (let i = 1; i < pts.length; i++) {
+            shape.lineTo(pts[i].x - cx, pts[i].y - cy);
+        }
+        shape.lineTo(pts[0].x - cx, pts[0].y - cy);
+        const floorGeo = new THREE.ShapeGeometry(shape);
+        const floor = new THREE.Mesh(floorGeo, new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85 }));
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = 0.5;
+        floor.receiveShadow = true;
+        scene.add(floor);
+    } else {
+        const floorGeo = new THREE.PlaneGeometry(sizeX, sizeZ);
+        const floor = new THREE.Mesh(floorGeo, new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85 }));
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = 0.5;
+        floor.receiveShadow = true;
+        scene.add(floor);
+    }
 
-    // Exterior walls
+    // Build walls from polylines
     const extMat = new THREE.MeshStandardMaterial({ color: 0x6a6e76, roughness: 0.9 });
-    (data.exterior_walls || []).forEach(w => {
-        const pts = w.points;
-        for (let i = 0; i < pts.length - 1; i++) {
-            buildWall(
-                [pts[i][0] - cx, pts[i][1] - cy],
-                [pts[i + 1][0] - cx, pts[i + 1][1] - cy],
-                WALL_HEIGHT, 12, extMat
-            );
-        }
-        if (pts.length >= 3) {
-            buildWall(
-                [pts[pts.length - 1][0] - cx, pts[pts.length - 1][1] - cy],
-                [pts[0][0] - cx, pts[0][1] - cy],
-                WALL_HEIGHT, 12, extMat
-            );
-        }
-    });
-
-    // Interior walls
     const intMat = new THREE.MeshStandardMaterial({ color: 0x848890, roughness: 0.88 });
-    (data.interior_walls || []).forEach(w => {
-        const pts = w.points;
-        for (let i = 0; i < pts.length - 1; i++) {
-            buildWall(
-                [pts[i][0] - cx, pts[i][1] - cy],
-                [pts[i + 1][0] - cx, pts[i + 1][1] - cy],
-                WALL_HEIGHT * 0.92, 7, intMat
-            );
+
+    (data.elements || []).forEach(el => {
+        if (el.type === 'extwall' && el.points && el.points.length >= 2) {
+            const pts = el.points;
+            for (let i = 0; i < pts.length - 1; i++) {
+                buildWall(
+                    [pts[i].x - cx, pts[i].y - cy],
+                    [pts[i+1].x - cx, pts[i+1].y - cy],
+                    WALL_HEIGHT, 12, extMat
+                );
+            }
+            // Close polygon
+            if (pts.length >= 3) {
+                buildWall(
+                    [pts[pts.length-1].x - cx, pts[pts.length-1].y - cy],
+                    [pts[0].x - cx, pts[0].y - cy],
+                    WALL_HEIGHT, 12, extMat
+                );
+            }
+        }
+        if (el.type === 'intwall' && el.points && el.points.length >= 2) {
+            const pts = el.points;
+            for (let i = 0; i < pts.length - 1; i++) {
+                buildWall(
+                    [pts[i].x - cx, pts[i].y - cy],
+                    [pts[i+1].x - cx, pts[i+1].y - cy],
+                    WALL_HEIGHT * 0.92, 7, intMat
+                );
+            }
         }
     });
 
     // Ducts
     const ductMat = new THREE.MeshStandardMaterial({ color: 0xf8f8f8, roughness: 0.35, metalness: 0.55 });
-    (data.ducts || []).forEach(d => {
-        const px = (d.x + d.w / 2) - cx;
-        const pz = (d.y + d.h / 2) - cy;
-        const length = Math.max(d.w, d.h);
-        const width = Math.max(Math.min(d.w, d.h), 14);
-        const angle = d.w >= d.h ? 0 : Math.PI / 2;
-        const geo = new THREE.BoxGeometry(length, 14, width);
-        const m = new THREE.Mesh(geo, ductMat);
-        m.position.set(px, WALL_HEIGHT - 12, pz);
-        m.rotation.y = angle;
-        m.castShadow = true;
-        scene.add(m);
+    (data.elements || []).forEach(el => {
+        if (el.type === 'duct' && el.points && el.points.length >= 2) {
+            for (let i = 0; i < el.points.length - 1; i++) {
+                buildDuct(
+                    [el.points[i].x - cx, el.points[i].y - cy],
+                    [el.points[i+1].x - cx, el.points[i+1].y - cy],
+                    WALL_HEIGHT - 12, ductMat
+                );
+            }
+        }
     });
 
     // VAVs
     const vavMat = new THREE.MeshStandardMaterial({ color: 0x1e40af, roughness: 0.45, metalness: 0.35, emissive: 0x1e3a8a, emissiveIntensity: 0.18 });
-    (data.vavs || []).forEach(v => {
-        const geo = new THREE.BoxGeometry(28, 24, 28);
-        const m = new THREE.Mesh(geo, vavMat);
-        m.position.set(v.cx - cx, WALL_HEIGHT - 22, v.cy - cy);
-        m.castShadow = true;
-        scene.add(m);
+    (data.elements || []).forEach(el => {
+        if (el.type === 'vav') {
+            const geo = new THREE.BoxGeometry(28, 24, 28);
+            const m = new THREE.Mesh(geo, vavMat);
+            m.position.set(el.x - cx, WALL_HEIGHT - 22, el.y - cy);
+            m.castShadow = true;
+            scene.add(m);
+        }
     });
 
-    // AHU
-    (data.ahus || []).forEach(a => {
-        const w = Math.max(a.w, 50);
-        const d = Math.max(a.h, 40);
-        const mat = new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.5, metalness: 0.35, emissive: 0x14532d, emissiveIntensity: 0.18 });
-        const geo = new THREE.BoxGeometry(w, 50, d);
-        const m = new THREE.Mesh(geo, mat);
-        m.position.set(a.cx - cx, WALL_HEIGHT - 30, a.cy - cy);
-        m.castShadow = true;
-        scene.add(m);
+    // AHUs
+    (data.elements || []).forEach(el => {
+        if (el.type === 'ahu') {
+            const mat = new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.5, metalness: 0.35, emissive: 0x14532d, emissiveIntensity: 0.18 });
+            const geo = new THREE.BoxGeometry(60, 50, 45);
+            const m = new THREE.Mesh(geo, mat);
+            m.position.set(el.x - cx, WALL_HEIGHT - 30, el.y - cy);
+            m.castShadow = true;
+            scene.add(m);
+        }
+    });
+
+    // Diffusers
+    const diffMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4, metalness: 0.2 });
+    (data.elements || []).forEach(el => {
+        if (el.type === 'diffuser') {
+            const geo = new THREE.BoxGeometry(14, 3, 14);
+            const m = new THREE.Mesh(geo, diffMat);
+            m.position.set(el.x - cx, WALL_HEIGHT - 5, el.y - cy);
+            m.castShadow = true;
+            scene.add(m);
+        }
     });
 
     const maxSize = Math.max(sizeX, sizeZ);
@@ -674,6 +785,19 @@ function buildWall(p1, p2, height, thickness, mat) {
     m.rotation.y = -angle;
     m.castShadow = true;
     m.receiveShadow = true;
+    scene.add(m);
+}
+
+function buildDuct(p1, p2, yPos, mat) {
+    const dx = p2[0] - p1[0], dz = p2[1] - p1[1];
+    const length = Math.sqrt(dx * dx + dz * dz);
+    if (length < 5) return;
+    const angle = Math.atan2(dz, dx);
+    const geo = new THREE.BoxGeometry(length, 14, 18);
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set((p1[0] + p2[0]) / 2, yPos, (p1[1] + p2[1]) / 2);
+    m.rotation.y = -angle;
+    m.castShadow = true;
     scene.add(m);
 }
 
@@ -750,7 +874,6 @@ def upload():
     if h > w:
         img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
 
-    # Resize to manageable size for web canvas
     max_dim = 1400
     h, w = img.shape[:2]
     if max(h, w) > max_dim:
@@ -758,14 +881,13 @@ def upload():
         img = cv2.resize(img, (int(w * scale), int(h * scale)))
 
     cv2.imwrite(UPLOAD_IMAGE_PATH, img)
-
     return render_template_string(EDITOR_PAGE, image_b64=image_to_base64(UPLOAD_IMAGE_PATH))
 
 
 @app.route("/editor")
 def editor():
     if not os.path.exists(UPLOAD_IMAGE_PATH):
-        return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No plan uploaded yet. <a href='/' style='color:#2d89ef'>Upload one</a></h2>"
+        return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No plan uploaded. <a href='/' style='color:#2d89ef'>Upload one</a></h2>"
     return render_template_string(EDITOR_PAGE, image_b64=image_to_base64(UPLOAD_IMAGE_PATH))
 
 
@@ -773,17 +895,13 @@ def editor():
 def process():
     try:
         data = request.get_json()
-        img_b64 = data["image"].split(",")[1]
-        img_bytes = base64.b64decode(img_b64)
-
-        with open(MARKED_IMAGE_PATH, "wb") as f:
-            f.write(img_bytes)
-
-        detection = detect_all_components(MARKED_IMAGE_PATH)
-
+        detection = {
+            "image_width": data["imageWidth"],
+            "image_height": data["imageHeight"],
+            "elements": data["elements"]
+        }
         with open(os.path.join(OUTPUT_FOLDER, "detection.json"), "w") as f:
             json.dump(detection, f)
-
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -795,16 +913,21 @@ def render3d():
         with open(os.path.join(OUTPUT_FOLDER, "detection.json"), "r") as f:
             detection = json.load(f)
     except FileNotFoundError:
-        return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No detection yet. <a href='/' style='color:#2d89ef'>Start over</a></h2>"
+        return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No data. <a href='/' style='color:#2d89ef'>Start over</a></h2>"
+
+    elements = detection.get("elements", [])
+    n_vavs = sum(1 for e in elements if e.get("type") == "vav")
+    n_ahus = sum(1 for e in elements if e.get("type") == "ahu")
+    n_ducts = sum(1 for e in elements if e.get("type") == "duct")
+    n_diffs = sum(1 for e in elements if e.get("type") == "diffuser")
+    n_ext = sum(1 for e in elements if e.get("type") == "extwall")
+    n_int = sum(1 for e in elements if e.get("type") == "intwall")
 
     return render_template_string(
         RESULT_PAGE,
         detection_json=json.dumps(detection),
-        n_vavs=len(detection.get("vavs", [])),
-        n_ahus=len(detection.get("ahus", [])),
-        n_ducts=len(detection.get("ducts", [])),
-        n_ext=len(detection.get("exterior_walls", [])),
-        n_int=len(detection.get("interior_walls", []))
+        n_vavs=n_vavs, n_ahus=n_ahus, n_ducts=n_ducts,
+        n_diffs=n_diffs, n_ext=n_ext, n_int=n_int
     )
 
 
