@@ -70,7 +70,7 @@ input[type=file] { background: transparent; color: #aab0c4; border: none; font-s
 </div>
 <button class="btn" type="submit">Open CAD Editor</button>
 </form>
-<div class="footer">Made by Paolo V. R.</div>
+<div class="footer">Made by Paolo V.</div>
 </div>
 </body>
 </html>'''
