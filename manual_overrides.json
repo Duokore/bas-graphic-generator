@@ -1,0 +1,6 @@
+{
+  "use_manual_vavs": true,
+  "use_manual_ahu": true,
+  "vavs": [],
+  "ahus": []
+}

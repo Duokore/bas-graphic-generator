@@ -1,0 +1,338 @@
+ <!DOCTYPE html>
+<html>
+<head>
+    <title>BAS Graphic Generator</title>
+    <style>
+        body{margin:0;background:#0d1117;color:white;font-family:Arial;text-align:center}
+        h1{margin-top:20px}
+        .toolbar{width:90%;margin:auto;margin-top:15px;display:flex;justify-content:center;gap:10px;flex-wrap:wrap}
+        .toolbtn{padding:12px 18px;border:none;border-radius:10px;background:#1f2937;color:white;font-weight:bold;cursor:pointer}
+        .toolbtn.active{background:#16a34a}
+        .container{margin-top:20px;position:relative;display:inline-block}
+        #plan{max-width:1400px;border-radius:12px;border:2px solid #333}
+        #overlay{position:absolute;left:0;top:0;cursor:crosshair}
+        .bottom{margin-top:20px;margin-bottom:40px}
+        button.main{padding:15px 25px;border:none;border-radius:10px;background:#16a34a;color:white;font-size:16px;font-weight:bold;cursor:pointer;margin:10px}
+    </style>
+</head>
+
+<body>
+<h1>BAS Graphic Generator</h1>
+
+<form action="/upload" method="POST" enctype="multipart/form-data">
+    <input type="file" name="file" required>
+    <button class="main" type="submit">Upload Plan</button>
+</form>
+
+{% if image %}
+<div class="toolbar">
+    <button class="toolbtn active" id="vavBtn">Add VAV</button>
+    <button class="toolbtn" id="ahuBtn">Add AHU</button>
+    <button class="toolbtn" id="ductBtn">Add Duct</button>
+    <button class="toolbtn" id="curveBtn">Add Curved Duct</button>
+    <button class="toolbtn" id="selectBtn">Select / Move</button>
+    <button class="toolbtn" id="deleteBtn">Delete</button>
+</div>
+
+<div class="container">
+    <img id="plan" src="data:image/png;base64,{{image}}">
+    <canvas id="overlay"></canvas>
+</div>
+
+<div class="bottom">
+    <button class="main" onclick="generateGraphic()">Generate Graphic</button>
+</div>
+{% endif %}
+
+<script>
+let currentTool = "VAV";
+
+const canvas = document.getElementById("overlay");
+const img = document.getElementById("plan");
+const ctx = canvas ? canvas.getContext("2d") : null;
+
+let points = [];
+let ducts = [];
+let selectedIndex = -1;
+let dragging = false;
+
+let pendingDuctStart = null;
+let pendingCurve = [];
+
+const grid = 24;
+
+function snap(value){
+    return Math.round(value / grid) * grid;
+}
+
+function resizeCanvas(){
+    if(!canvas || !img) return;
+    canvas.width = img.clientWidth;
+    canvas.height = img.clientHeight;
+    canvas.style.width = img.clientWidth + "px";
+    canvas.style.height = img.clientHeight + "px";
+    draw();
+}
+
+window.onload = resizeCanvas;
+window.onresize = resizeCanvas;
+
+function setTool(tool){
+    currentTool = tool;
+    pendingDuctStart = null;
+    pendingCurve = [];
+
+    document.querySelectorAll(".toolbtn").forEach(btn => btn.classList.remove("active"));
+
+    if(tool === "VAV") document.getElementById("vavBtn").classList.add("active");
+    if(tool === "AHU") document.getElementById("ahuBtn").classList.add("active");
+    if(tool === "DUCT") document.getElementById("ductBtn").classList.add("active");
+    if(tool === "CURVE") document.getElementById("curveBtn").classList.add("active");
+    if(tool === "SELECT") document.getElementById("selectBtn").classList.add("active");
+    if(tool === "DELETE") document.getElementById("deleteBtn").classList.add("active");
+
+    draw();
+}
+
+document.getElementById("vavBtn").onclick = () => setTool("VAV");
+document.getElementById("ahuBtn").onclick = () => setTool("AHU");
+document.getElementById("ductBtn").onclick = () => setTool("DUCT");
+document.getElementById("curveBtn").onclick = () => setTool("CURVE");
+document.getElementById("selectBtn").onclick = () => setTool("SELECT");
+document.getElementById("deleteBtn").onclick = () => setTool("DELETE");
+
+function draw(){
+    if(!ctx) return;
+
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    ducts.forEach(d => {
+        ctx.strokeStyle = "red";
+        ctx.lineWidth = 8;
+        ctx.lineCap = "round";
+
+        ctx.beginPath();
+
+        if(d.type === "curve"){
+            ctx.moveTo(d.x1, d.y1);
+            ctx.quadraticCurveTo(d.cx, d.cy, d.x2, d.y2);
+        }else{
+            ctx.moveTo(d.x1, d.y1);
+            ctx.lineTo(d.x2, d.y2);
+        }
+
+        ctx.stroke();
+    });
+
+    if(pendingDuctStart){
+        ctx.fillStyle = "yellow";
+        ctx.beginPath();
+        ctx.arc(pendingDuctStart.x, pendingDuctStart.y, 8, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    pendingCurve.forEach(p => {
+        ctx.fillStyle = "orange";
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 8, 0, Math.PI * 2);
+        ctx.fill();
+    });
+
+    for(let i=0;i<points.length;i++){
+        const p = points[i];
+
+        if(p.type === "VAV"){
+            ctx.fillStyle = "#4da3ff";
+            ctx.fillRect(p.x - 12, p.y - 12, 24, 24);
+            ctx.strokeStyle = "#003366";
+            ctx.lineWidth = 3;
+            ctx.strokeRect(p.x - 12, p.y - 12, 24, 24);
+        }
+
+        if(p.type === "AHU"){
+            ctx.fillStyle = "#39d353";
+            ctx.fillRect(p.x - 24, p.y - 18, 48, 36);
+            ctx.strokeStyle = "#0f5d1f";
+            ctx.lineWidth = 4;
+            ctx.strokeRect(p.x - 24, p.y - 18, 48, 36);
+        }
+    }
+}
+
+function getMousePos(e){
+    const rect = canvas.getBoundingClientRect();
+    return {x:e.clientX - rect.left, y:e.clientY - rect.top};
+}
+
+function hitTest(mx,my){
+    for(let i=points.length-1;i>=0;i--){
+        const p = points[i];
+        let w = p.type === "AHU" ? 48 : 24;
+        let h = p.type === "AHU" ? 36 : 24;
+
+        if(mx > p.x - w/2 && mx < p.x + w/2 && my > p.y - h/2 && my < p.y + h/2){
+            return i;
+        }
+    }
+    return -1;
+}
+
+canvas.addEventListener("mousedown", e=>{
+    const pos = getMousePos(e);
+
+    if(currentTool === "VAV"){
+        points.push({type:"VAV", x:pos.x, y:pos.y});
+        draw();
+        return;
+    }
+
+    if(currentTool === "AHU"){
+        points.push({type:"AHU", x:pos.x, y:pos.y});
+        draw();
+        return;
+    }
+
+    if(currentTool === "DUCT"){
+        if(!pendingDuctStart){
+            pendingDuctStart = {x:snap(pos.x), y:snap(pos.y)};
+        }else{
+            let dx = Math.abs(pos.x - pendingDuctStart.x);
+            let dy = Math.abs(pos.y - pendingDuctStart.y);
+
+            let endX = snap(pos.x);
+            let endY = snap(pos.y);
+
+            if(dx > dy){
+                endY = pendingDuctStart.y;
+            }else{
+                endX = pendingDuctStart.x;
+            }
+
+            ducts.push({
+                type:"straight",
+                x1:pendingDuctStart.x,
+                y1:pendingDuctStart.y,
+                x2:endX,
+                y2:endY
+            });
+
+            pendingDuctStart = null;
+        }
+
+        draw();
+        return;
+    }
+
+    if(currentTool === "CURVE"){
+        pendingCurve.push({x:pos.x, y:pos.y});
+
+        if(pendingCurve.length === 3){
+            ducts.push({
+                type:"curve",
+                x1:pendingCurve[0].x,
+                y1:pendingCurve[0].y,
+                cx:pendingCurve[1].x,
+                cy:pendingCurve[1].y,
+                x2:pendingCurve[2].x,
+                y2:pendingCurve[2].y
+            });
+
+            pendingCurve = [];
+        }
+
+        draw();
+        return;
+    }
+
+    if(currentTool === "DELETE"){
+        const idx = hitTest(pos.x,pos.y);
+
+        if(idx !== -1){
+            points.splice(idx,1);
+            draw();
+            return;
+        }
+
+        if(ducts.length > 0){
+            ducts.pop();
+            draw();
+        }
+
+        return;
+    }
+
+    if(currentTool === "SELECT"){
+        const idx = hitTest(pos.x,pos.y);
+
+        if(idx !== -1){
+            selectedIndex = idx;
+            dragging = true;
+        }
+    }
+});
+
+canvas.addEventListener("mousemove", e=>{
+    if(!dragging) return;
+
+    const pos = getMousePos(e);
+    points[selectedIndex].x = pos.x;
+    points[selectedIndex].y = pos.y;
+    draw();
+});
+
+canvas.addEventListener("mouseup", ()=>{
+    dragging = false;
+});
+
+async function generateGraphic(){
+    const scaleX = img.naturalWidth / img.clientWidth;
+    const scaleY = img.naturalHeight / img.clientHeight;
+
+    const exportPoints = points.map(p=>({
+        type:p.type,
+        x:Math.round(p.x * scaleX),
+        y:Math.round(p.y * scaleY)
+    }));
+
+    const exportDucts = ducts.map(d=>{
+        if(d.type === "curve"){
+            return {
+                type:"curve",
+                x1:Math.round(d.x1 * scaleX),
+                y1:Math.round(d.y1 * scaleY),
+                cx:Math.round(d.cx * scaleX),
+                cy:Math.round(d.cy * scaleY),
+                x2:Math.round(d.x2 * scaleX),
+                y2:Math.round(d.y2 * scaleY)
+            };
+        }
+
+        return {
+            type:"straight",
+            x1:Math.round(d.x1 * scaleX),
+            y1:Math.round(d.y1 * scaleY),
+            x2:Math.round(d.x2 * scaleX),
+            y2:Math.round(d.y2 * scaleY)
+        };
+    });
+
+    const res = await fetch("/generate_manual", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+            points:exportPoints,
+            ducts:exportDucts
+        })
+    });
+
+    const data = await res.json();
+
+    if(data.success){
+        window.location.href = "/result";
+    }else{
+        alert(data.error);
+    }
+}
+</script>
+</body>
+</html>
