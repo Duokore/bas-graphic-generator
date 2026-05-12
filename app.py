@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import fitz
 from geometry_engine import *
-
+from cad_adapter import extract_cad_geometry
 app = Flask(__name__)
 
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-change-this")
