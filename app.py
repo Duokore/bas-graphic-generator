@@ -558,16 +558,10 @@ def download():
 
 
 if __name__ == "__main__":
-    port = int(
-        os.environ.get("PORT", 5000)
-    )
+    port = int(os.environ.get("PORT", 5000))
 
     app.run(
         host="0.0.0.0",
         port=port,
         debug=True
-<<<<<<< HEAD
     )
-=======
-    )
->>>>>>> e629d1f9eb644fe9b20d183fb3329188b8d4bfbf
