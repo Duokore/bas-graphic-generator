@@ -556,7 +556,39 @@ def download():
         as_attachment=True
     )
 
+@app.route("/save_project", methods=["POST"])
+def save_project():
+    data = request.get_json()
 
+    points = data.get("points", [])
+    ducts = data.get("ducts", [])
+
+    with open(PROJECT_FILE, "w") as f:
+        json.dump({
+            "points": points,
+            "ducts": ducts
+        }, f, indent=2)
+
+    return jsonify({
+        "success": True
+    })
+
+
+@app.route("/load_project")
+def load_project():
+    if not os.path.exists(PROJECT_FILE):
+        return jsonify({
+            "success": False,
+            "error": "No saved project found."
+        })
+
+    with open(PROJECT_FILE, "r") as f:
+        project = json.load(f)
+
+    return jsonify({
+        "success": True,
+        "project": project
+    })
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
 

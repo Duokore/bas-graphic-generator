@@ -40,10 +40,104 @@
 </div>
 
 <div class="bottom">
+    <button class="main" onclick="saveProject()">Save Project</button>
+    <button class="main" onclick="loadProject()">Load Project</button>
     <button class="main" onclick="generateGraphic()">Generate Graphic</button>
 </div>
 {% endif %}
+async function saveProject(){
+    const scaleX = img.naturalWidth / img.clientWidth;
+    const scaleY = img.naturalHeight / img.clientHeight;
 
+    const exportPoints = points.map(p=>({
+        type:p.type,
+        x:Math.round(p.x * scaleX),
+        y:Math.round(p.y * scaleY)
+    }));
+
+    const exportDucts = ducts.map(d=>{
+        if(d.type === "curve"){
+            return {
+                type:"curve",
+                x1:Math.round(d.x1 * scaleX),
+                y1:Math.round(d.y1 * scaleY),
+                cx:Math.round(d.cx * scaleX),
+                cy:Math.round(d.cy * scaleY),
+                x2:Math.round(d.x2 * scaleX),
+                y2:Math.round(d.y2 * scaleY)
+            };
+        }
+
+        return {
+            type:"straight",
+            x1:Math.round(d.x1 * scaleX),
+            y1:Math.round(d.y1 * scaleY),
+            x2:Math.round(d.x2 * scaleX),
+            y2:Math.round(d.y2 * scaleY)
+        };
+    });
+
+    const res = await fetch("/save_project", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+            points:exportPoints,
+            ducts:exportDucts
+        })
+    });
+
+    const data = await res.json();
+
+    if(data.success){
+        alert("Project saved.");
+    }else{
+        alert(data.error);
+    }
+}
+
+async function loadProject(){
+    const res = await fetch("/load_project");
+    const data = await res.json();
+
+    if(!data.success){
+        alert(data.error);
+        return;
+    }
+
+    const scaleX = img.clientWidth / img.naturalWidth;
+    const scaleY = img.clientHeight / img.naturalHeight;
+
+    points = data.project.points.map(p=>({
+        type:p.type,
+        x:p.x * scaleX,
+        y:p.y * scaleY
+    }));
+
+    ducts = data.project.ducts.map(d=>{
+        if(d.type === "curve"){
+            return {
+                type:"curve",
+                x1:d.x1 * scaleX,
+                y1:d.y1 * scaleY,
+                cx:d.cx * scaleX,
+                cy:d.cy * scaleY,
+                x2:d.x2 * scaleX,
+                y2:d.y2 * scaleY
+            };
+        }
+
+        return {
+            type:"straight",
+            x1:d.x1 * scaleX,
+            y1:d.y1 * scaleY,
+            x2:d.x2 * scaleX,
+            y2:d.y2 * scaleY
+        };
+    });
+
+    draw();
+    alert("Project loaded.");
+}
 <script>
 let currentTool = "VAV";
 
