@@ -32,7 +32,7 @@ def pdf_to_png(pdf_path, out_path):
 HOME_PAGE = '''<!DOCTYPE html>
 <html>
 <head>
-<title>BAS Generator v19 - Synchrony Style</title>
+<title>BAS Generator v20 - SVG Isometric</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
@@ -54,21 +54,21 @@ input[type=file] { background: transparent; color: #aab0c4; border: none; font-s
 <body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v19 <span class="badge">SYNCHRONY</span></h1>
-<p class="sub">Professional 3D HVAC graphics - Tracer Synchrony style</p>
+<h1>BAS Generator v20 <span class="badge">SVG ISOMETRIC</span></h1>
+<p class="sub">True Tracer Synchrony style - SVG vector graphics</p>
 <div style="text-align: left; margin-bottom: 24px;">
 <div class="feature"><div class="color-dot" style="background:#9333ea"></div> Click corners for walls (always straight)</div>
-<div class="feature"><div class="color-dot" style="background:#1e40af"></div> Click to place VAVs</div>
-<div class="feature"><div class="color-dot" style="background:#16a34a"></div> Click to place AHU</div>
-<div class="feature"><div class="color-dot" style="background:#000"></div> Two clicks for duct lines</div>
-<div class="feature"><div class="color-dot" style="background:#fff;border:1px solid #888"></div> Synchrony-style render with soft shadows</div>
+<div class="feature"><div class="color-dot" style="background:#1e40af"></div> Click to place VAVs (isometric blue cubes)</div>
+<div class="feature"><div class="color-dot" style="background:#16a34a"></div> Click to place AHU (green box)</div>
+<div class="feature"><div class="color-dot" style="background:#fff;border:1px solid #888"></div> Two clicks for white duct lines</div>
+<div class="feature"><div class="color-dot" style="background:#444"></div> Synchrony-style 2D isometric output</div>
 </div>
 <form action="/upload" method="post" enctype="multipart/form-data">
 <div class="zone">
 <input type="file" name="file" accept="image/png,image/jpeg,application/pdf" required>
 <span class="lbl">Upload original mechanical plan</span>
 </div>
-<button class="btn" type="submit">Open Pro CAD Editor</button>
+<button class="btn" type="submit">Open CAD Editor</button>
 </form>
 <div class="footer">Made by Paolo V. and Emmanuel R.</div>
 </div>
@@ -79,7 +79,7 @@ input[type=file] { background: transparent; color: #aab0c4; border: none; font-s
 EDITOR_PAGE = '''<!DOCTYPE html>
 <html>
 <head>
-<title>Pro CAD Editor</title>
+<title>CAD Editor v20</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; padding: 8px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
@@ -96,7 +96,6 @@ h1 { font-size: 16px; background: linear-gradient(135deg, #2d89ef, #b388ff); -we
 canvas { display: block; }
 .action-btn { padding: 8px 16px; border: none; border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; }
 .btn-green { background: #16a34a; color: white; }
-.btn-blue { background: #1a6fd4; color: white; }
 .btn-red { background: #dc2626; color: white; }
 .btn-gray { background: #333; color: white; }
 .spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
@@ -106,16 +105,15 @@ canvas { display: block; }
 .status { padding: 4px 12px; background: #1e2233; border-radius: 6px; font-size: 11px; color: #aab0c4; min-width: 200px; text-align: center; }
 .cursor-cross { cursor: crosshair; }
 .cursor-move { cursor: move; }
-.cursor-default { cursor: default; }
 </style>
 </head>
 <body>
 <div class="topbar">
-<h1>Pro CAD Editor &mdash; Click points to draw</h1>
+<h1>CAD Editor v20 &mdash; Click to draw, double-click to finish</h1>
 <div style="display: flex; gap: 6px;">
 <button onclick="undo()" class="action-btn btn-gray">&#8617; Undo</button>
 <button onclick="clearAll()" class="action-btn btn-red">Clear</button>
-<button onclick="generate3D()" class="action-btn btn-green">Generate 3D &rarr;</button>
+<button onclick="generate()" class="action-btn btn-green">Generate Graphic &rarr;</button>
 </div>
 </div>
 
@@ -127,7 +125,7 @@ canvas { display: block; }
 <div class="color-swatch" style="background:#ea580c"></div> Int Wall
 </button>
 <button class="tool-btn" data-tool="duct" onclick="selectTool(this)">
-<div class="color-swatch" style="background:#000;border:1px solid #fff"></div> Duct
+<div class="color-swatch" style="background:#fff;border:1px solid #888"></div> Duct
 </button>
 
 <div class="divider"></div>
@@ -161,7 +159,7 @@ canvas { display: block; }
 
 <div class="loading-overlay" id="loading">
 <div class="spinner"></div>
-<div style="color:white;font-size:14px;">Building Synchrony-style 3D...</div>
+<div style="color:white;font-size:14px;">Building Synchrony-style SVG...</div>
 </div>
 
 <script>
@@ -183,7 +181,7 @@ let dragOffset = null;
 const COLORS = {
     extwall: '#9333ea',
     intwall: '#ea580c',
-    duct: '#000000',
+    duct: '#ffffff',
     vav: '#1e40af',
     ahu: '#16a34a',
     diffuser: '#ffffff'
@@ -228,7 +226,6 @@ function selectTool(btn) {
 
     drawCanvas.className = '';
     if (currentTool === 'move') drawCanvas.classList.add('cursor-move');
-    else if (currentTool === 'delete') drawCanvas.classList.add('cursor-default');
     else drawCanvas.classList.add('cursor-cross');
 
     redraw();
@@ -426,10 +423,8 @@ function drawElement(el, isInProgress = false) {
         drawCtx.fillStyle = color;
         drawCtx.strokeStyle = '#666';
         drawCtx.lineWidth = 1.5;
-        drawCtx.beginPath();
-        drawCtx.arc(el.x, el.y, 6, 0, Math.PI * 2);
-        drawCtx.fill();
-        drawCtx.stroke();
+        drawCtx.fillRect(el.x - 6, el.y - 6, 12, 12);
+        drawCtx.strokeRect(el.x - 6, el.y - 6, 12, 12);
         return;
     }
 
@@ -485,7 +480,7 @@ function clearAll() {
     redraw();
 }
 
-async function generate3D() {
+async function generate() {
     if (currentPolyline && currentPolyline.points.length >= 2) {
         elements.push(currentPolyline);
         currentPolyline = null;
@@ -505,7 +500,7 @@ async function generate3D() {
         });
         const result = await response.json();
         if (result.success) {
-            window.location.href = '/render3d';
+            window.location.href = '/result';
         } else {
             alert('Error: ' + result.error);
             document.getElementById('loading').classList.remove('active');
@@ -523,9 +518,7 @@ async function generate3D() {
 RESULT_PAGE = '''<!DOCTYPE html>
 <html>
 <head>
-<title>Synchrony 3D BAS</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<title>BAS Graphic Result</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; padding: 12px; }
@@ -534,19 +527,19 @@ h1 { text-align: center; font-size: 22px; margin-bottom: 4px; background: linear
 .stats { display: flex; justify-content: center; gap: 10px; margin: 8px 0 12px; flex-wrap: wrap; }
 .stat { background: #1e2233; padding: 5px 12px; border-radius: 8px; font-size: 12px; color: #aab0c4; border: 1px solid #2a3050; }
 .stat b { color: #fff; }
-.viewer-3d { width: 100%; height: 78vh; background: #1f1f23; border-radius: 12px; border: 1px solid #2a3050; overflow: hidden; position: relative; }
+.viewer-svg { width: 100%; height: 78vh; background: #000; border-radius: 12px; border: 1px solid #2a3050; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.viewer-svg svg { max-width: 100%; height: auto; }
 .actions { text-align: center; margin-top: 12px; display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
 .btn { padding: 10px 18px; border: none; border-radius: 10px; font-size: 13px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-block; }
 .btn-blue { background: #1a6fd4; color: white; }
 .btn-green { background: #1a9e4a; color: white; }
 .btn-gray { background: #252a38; color: #aab0c4; }
-.btn-orange { background: #ff7e1a; color: white; }
 .footer { text-align: center; color: #3a4060; font-size: 11px; margin-top: 10px; }
 </style>
 </head>
 <body>
-<h1>Synchrony-Style 3D BAS Graphic</h1>
-<p class="sub">Drag = Rotate | Scroll = Zoom | Right-click = Pan</p>
+<h1>Synchrony-Style BAS Graphic</h1>
+<p class="sub">SVG Isometric Render - Ready for Tracer Synchrony / Niagara</p>
 <div class="stats">
 <div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
 <div class="stat">AHUs: <b>{{ n_ahus }}</b></div>
@@ -555,12 +548,10 @@ h1 { text-align: center; font-size: 22px; margin-bottom: 4px; background: linear
 <div class="stat">Ext Walls: <b>{{ n_ext }}</b></div>
 <div class="stat">Int Walls: <b>{{ n_int }}</b></div>
 </div>
-<div class="viewer-3d" id="viewer"></div>
+<div class="viewer-svg" id="svgViewer"></div>
 <div class="actions">
-<button onclick="screenshot()" class="btn btn-green">Download PNG</button>
-<button onclick="topView()" class="btn btn-orange">Top View</button>
-<button onclick="synchView()" class="btn btn-blue">Synchrony View</button>
-<button onclick="resetView()" class="btn btn-blue">Reset</button>
+<button onclick="downloadSVG()" class="btn btn-green">Download SVG</button>
+<button onclick="downloadPNG()" class="btn btn-blue">Download PNG</button>
 <a href="/editor" class="btn btn-gray">Edit Markings</a>
 <a href="/" class="btn btn-gray">New Plan</a>
 </div>
@@ -569,442 +560,376 @@ h1 { text-align: center; font-size: 22px; margin-bottom: 4px; background: linear
 <script>
 const data = {{ detection_json | safe }};
 
-let scene, camera, renderer, controls, initPos, initTarget;
+// Isometric projection constants
+const ISO_ANGLE_X = Math.PI / 6;  // 30 degrees
+const ISO_ANGLE_Y = Math.PI / 6;
+const COS30 = Math.cos(ISO_ANGLE_X);
+const SIN30 = Math.sin(ISO_ANGLE_X);
 
-function init() {
-    const c = document.getElementById('viewer');
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1f1f23);
-    camera = new THREE.PerspectiveCamera(25, c.clientWidth / c.clientHeight, 0.1, 30000);
-    renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, alpha: false });
-    renderer.setSize(c.clientWidth, c.clientHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    renderer.outputEncoding = THREE.sRGBEncoding;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.15;
-    c.appendChild(renderer.domElement);
-
-    controls = new THREE.OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
-
-    setupLighting();
-    buildScene();
-    window.addEventListener('resize', onResize);
-    animate();
+// Project 3D point to 2D isometric screen
+function isoProject(x, y, z) {
+    // Standard isometric: x goes right-down, y goes left-down, z goes up
+    const sx = (x - y) * COS30;
+    const sy = (x + y) * SIN30 - z;
+    return [sx, sy];
 }
 
-function setupLighting() {
-    // Soft, even ambient like a studio
-    scene.add(new THREE.AmbientLight(0xffffff, 0.9));
-
-    // Hemisphere - natural sky/ground
-    const hemi = new THREE.HemisphereLight(0xffffff, 0xe0e0e0, 0.6);
-    hemi.position.set(0, 1500, 0);
-    scene.add(hemi);
-
-    // Main key light - very soft shadows
-    const key = new THREE.DirectionalLight(0xffffff, 0.55);
-    key.position.set(800, 2500, 1000);
-    key.castShadow = true;
-    key.shadow.mapSize.width = 4096;
-    key.shadow.mapSize.height = 4096;
-    key.shadow.camera.left = -3000;
-    key.shadow.camera.right = 3000;
-    key.shadow.camera.top = 3000;
-    key.shadow.camera.bottom = -3000;
-    key.shadow.camera.near = 100;
-    key.shadow.camera.far = 6000;
-    key.shadow.bias = -0.0003;
-    key.shadow.radius = 12;
-    key.shadow.blurSamples = 25;
-    scene.add(key);
-
-    // Fill lights - very soft
-    const fill1 = new THREE.DirectionalLight(0xffffff, 0.25);
-    fill1.position.set(-1000, 1500, -500);
-    scene.add(fill1);
-
-    const fill2 = new THREE.DirectionalLight(0xffffff, 0.2);
-    fill2.position.set(500, 1000, -800);
-    scene.add(fill2);
-
-    // Front rim light for depth
-    const rim = new THREE.DirectionalLight(0xffffff, 0.15);
-    rim.position.set(0, 300, 2000);
-    scene.add(rim);
-}
-
-function buildScene() {
-    const cx = data.image_width / 2;
-    const cy = data.image_height / 2;
-    const sizeX = data.image_width;
-    const sizeZ = data.image_height;
-    const WALL_HEIGHT = 70;
-
+function generateSVG() {
+    const imgW = data.image_width;
+    const imgH = data.image_height;
     const elements = data.elements || [];
-    const extWallElement = elements.find(e => e.type === 'extwall' && e.points && e.points.length >= 3);
 
-    // === FLOOR with VERY SUBTLE grid (Synchrony style) ===
-    const floorCanvas = document.createElement('canvas');
-    floorCanvas.width = 2048;
-    floorCanvas.height = 2048;
-    const fctx = floorCanvas.getContext('2d');
+    // Find building bounds
+    const extWall = elements.find(e => e.type === 'extwall' && e.points && e.points.length >= 3);
 
-    // Soft gradient base - very light grey
-    const gradient = fctx.createRadialGradient(1024, 1024, 100, 1024, 1024, 1400);
-    gradient.addColorStop(0, '#f4f4f6');
-    gradient.addColorStop(1, '#e6e6e9');
-    fctx.fillStyle = gradient;
-    fctx.fillRect(0, 0, 2048, 2048);
+    let minX = 0, maxX = imgW, minY = 0, maxY = imgH;
+    if (extWall) {
+        const xs = extWall.points.map(p => p.x);
+        const ys = extWall.points.map(p => p.y);
+        minX = Math.min(...xs);
+        maxX = Math.max(...xs);
+        minY = Math.min(...ys);
+        maxY = Math.max(...ys);
+    }
+    const buildingCx = (minX + maxX) / 2;
+    const buildingCy = (minY + maxY) / 2;
 
-    // Very subtle grid lines
-    fctx.strokeStyle = '#d8d8dc';
-    fctx.lineWidth = 1;
-    const tileSize = 100;
-    for (let i = 0; i <= 2048; i += tileSize) {
-        fctx.beginPath();
-        fctx.moveTo(i, 0); fctx.lineTo(i, 2048);
-        fctx.stroke();
-        fctx.beginPath();
-        fctx.moveTo(0, i); fctx.lineTo(2048, i);
-        fctx.stroke();
+    const WALL_HEIGHT = 60;
+
+    // Transform image coord to centered coord
+    function toLocal(p) {
+        return { x: p.x - buildingCx, y: p.y - buildingCy };
     }
 
-    // Even more subtle minor lines
-    fctx.strokeStyle = '#e8e8ec';
-    fctx.lineWidth = 0.5;
-    const minorSize = 25;
-    for (let i = 0; i <= 2048; i += minorSize) {
-        if (i % tileSize === 0) continue;
-        fctx.beginPath();
-        fctx.moveTo(i, 0); fctx.lineTo(i, 2048);
-        fctx.stroke();
-        fctx.beginPath();
-        fctx.moveTo(0, i); fctx.lineTo(2048, i);
-        fctx.stroke();
+    // Project to isometric SVG space
+    function proj(x, y, z = 0) {
+        return isoProject(x, y, z);
     }
 
-    const floorTex = new THREE.CanvasTexture(floorCanvas);
-    floorTex.wrapS = THREE.RepeatWrapping;
-    floorTex.wrapT = THREE.RepeatWrapping;
-    floorTex.repeat.set(sizeX / 200, sizeZ / 200);
-    floorTex.anisotropy = 16;
-    floorTex.encoding = THREE.sRGBEncoding;
-
-    const floorMat = new THREE.MeshStandardMaterial({
-        map: floorTex,
-        roughness: 0.95,
-        metalness: 0.0
-    });
-
-    // Build floor from exterior wall polygon
-    if (extWallElement) {
-        const shape = new THREE.Shape();
-        const pts = extWallElement.points;
-        shape.moveTo(pts[0].x - cx, pts[0].y - cy);
-        for (let i = 1; i < pts.length; i++) {
-            shape.lineTo(pts[i].x - cx, pts[i].y - cy);
+    // Calculate SVG canvas bounds
+    let svgMinX = 0, svgMaxX = 0, svgMinY = 0, svgMaxY = 0;
+    const corners = [
+        toLocal({ x: minX, y: minY }),
+        toLocal({ x: maxX, y: minY }),
+        toLocal({ x: maxX, y: maxY }),
+        toLocal({ x: minX, y: maxY })
+    ];
+    for (const c of corners) {
+        for (const z of [0, WALL_HEIGHT]) {
+            const [sx, sy] = proj(c.x, c.y, z);
+            svgMinX = Math.min(svgMinX, sx);
+            svgMaxX = Math.max(svgMaxX, sx);
+            svgMinY = Math.min(svgMinY, sy);
+            svgMaxY = Math.max(svgMaxY, sy);
         }
-        shape.lineTo(pts[0].x - cx, pts[0].y - cy);
-
-        const floorGeo = new THREE.ShapeGeometry(shape);
-        const floor = new THREE.Mesh(floorGeo, floorMat);
-        floor.rotation.x = -Math.PI / 2;
-        floor.position.y = 0.5;
-        floor.receiveShadow = true;
-        scene.add(floor);
-    } else {
-        const floorGeo = new THREE.PlaneGeometry(sizeX, sizeZ);
-        const floor = new THREE.Mesh(floorGeo, floorMat);
-        floor.rotation.x = -Math.PI / 2;
-        floor.position.y = 0.5;
-        floor.receiveShadow = true;
-        scene.add(floor);
     }
 
-    // === WALLS - clean white with soft edges ===
-    const extMat = new THREE.MeshStandardMaterial({
-        color: 0xfafafa,
-        roughness: 0.9,
-        metalness: 0.0
-    });
-    const intMat = new THREE.MeshStandardMaterial({
-        color: 0xf5f5f7,
-        roughness: 0.9,
-        metalness: 0.0
-    });
+    const padding = 100;
+    const svgW = svgMaxX - svgMinX + padding * 2;
+    const svgH = svgMaxY - svgMinY + padding * 2;
+    const offsetX = -svgMinX + padding;
+    const offsetY = -svgMinY + padding;
 
-    // Top cap material (darker edge like in Synchrony)
-    const wallTopMat = new THREE.MeshStandardMaterial({
-        color: 0x9a9a9e,
-        roughness: 0.85,
-        metalness: 0.05
-    });
+    function projSVG(x, y, z = 0) {
+        const [sx, sy] = proj(x, y, z);
+        return [sx + offsetX, sy + offsetY];
+    }
 
+    // Build SVG
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${svgW} ${svgH}" width="${svgW}" height="${svgH}">`;
+
+    // Background
+    svg += `<rect width="${svgW}" height="${svgH}" fill="#000000"/>`;
+
+    // Defs - filters and patterns
+    svg += `<defs>`;
+
+    // Floor tile pattern
+    svg += `<pattern id="floorTile" width="40" height="40" patternUnits="userSpaceOnUse" patternTransform="rotate(0)">`;
+    svg += `<rect width="40" height="40" fill="#c4c4c8"/>`;
+    svg += `<path d="M 0 0 L 40 0 M 0 0 L 0 40" stroke="#ffffff" stroke-width="0.8" opacity="0.6"/>`;
+    svg += `</pattern>`;
+
+    // Floor pattern transformed to isometric
+    const tileSize = 25;
+    svg += `<pattern id="isoTile" width="${tileSize * COS30 * 2}" height="${tileSize * SIN30 * 2}" patternUnits="userSpaceOnUse">`;
+    svg += `<polygon points="${tileSize * COS30},0 ${tileSize * COS30 * 2},${tileSize * SIN30} ${tileSize * COS30},${tileSize * SIN30 * 2} 0,${tileSize * SIN30}" fill="#cfcfd3" stroke="#ffffff" stroke-width="0.5" opacity="0.85"/>`;
+    svg += `</pattern>`;
+
+    // Soft shadow filter
+    svg += `<filter id="softShadow" x="-50%" y="-50%" width="200%" height="200%">`;
+    svg += `<feGaussianBlur in="SourceAlpha" stdDeviation="3"/>`;
+    svg += `<feOffset dx="2" dy="4" result="offsetblur"/>`;
+    svg += `<feComponentTransfer><feFuncA type="linear" slope="0.4"/></feComponentTransfer>`;
+    svg += `<feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>`;
+    svg += `</filter>`;
+
+    svg += `</defs>`;
+
+    // === FLOOR (from exterior wall polygon) ===
+    if (extWall) {
+        const pts = extWall.points.map(p => toLocal(p));
+        let floorPath = '';
+        for (let i = 0; i < pts.length; i++) {
+            const [sx, sy] = projSVG(pts[i].x, pts[i].y, 0);
+            floorPath += (i === 0 ? 'M' : 'L') + sx + ',' + sy + ' ';
+        }
+        floorPath += 'Z';
+        svg += `<path d="${floorPath}" fill="url(#isoTile)" stroke="#a8a8ac" stroke-width="0.5"/>`;
+    }
+
+    // Helper to draw an isometric wall segment (two endpoints + height)
+    function drawWall(p1, p2, height, fillSide, fillTop, strokeColor) {
+        const [b1x, b1y] = projSVG(p1.x, p1.y, 0);
+        const [b2x, b2y] = projSVG(p2.x, p2.y, 0);
+        const [t1x, t1y] = projSVG(p1.x, p1.y, height);
+        const [t2x, t2y] = projSVG(p2.x, p2.y, height);
+
+        // Side face (the visible wall face)
+        const sidePath = `M ${b1x},${b1y} L ${b2x},${b2y} L ${t2x},${t2y} L ${t1x},${t1y} Z`;
+        let walls = `<path d="${sidePath}" fill="${fillSide}" stroke="${strokeColor}" stroke-width="0.7" stroke-linejoin="round"/>`;
+
+        // Top edge highlight
+        walls += `<line x1="${t1x}" y1="${t1y}" x2="${t2x}" y2="${t2y}" stroke="${fillTop}" stroke-width="2.5"/>`;
+
+        return walls;
+    }
+
+    // Helper to draw thick wall (with depth on top showing thickness)
+    function drawThickWall(p1, p2, height, thickness) {
+        // Compute perpendicular offset for thickness
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len < 1) return '';
+        const nx = -dy / len * thickness / 2;
+        const ny = dx / len * thickness / 2;
+
+        const p1a = { x: p1.x + nx, y: p1.y + ny };
+        const p1b = { x: p1.x - nx, y: p1.y - ny };
+        const p2a = { x: p2.x + nx, y: p2.y + ny };
+        const p2b = { x: p2.x - nx, y: p2.y - ny };
+
+        const [b1ax, b1ay] = projSVG(p1a.x, p1a.y, 0);
+        const [b2ax, b2ay] = projSVG(p2a.x, p2a.y, 0);
+        const [b1bx, b1by] = projSVG(p1b.x, p1b.y, 0);
+        const [b2bx, b2by] = projSVG(p2b.x, p2b.y, 0);
+
+        const [t1ax, t1ay] = projSVG(p1a.x, p1a.y, height);
+        const [t2ax, t2ay] = projSVG(p2a.x, p2a.y, height);
+        const [t1bx, t1by] = projSVG(p1b.x, p1b.y, height);
+        const [t2bx, t2by] = projSVG(p2b.x, p2b.y, height);
+
+        let walls = '';
+
+        // Front face (visible side - the one further in iso projection)
+        // In iso, the "back" side is the one with higher y in image
+        // We draw the side that's visible from the camera
+        const visibleSide = `M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z`;
+        walls += `<path d="${visibleSide}" fill="#9a9da3" stroke="#5a5d63" stroke-width="0.6" stroke-linejoin="round"/>`;
+
+        // Top face (visible from above due to iso angle)
+        const topFace = `M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z`;
+        walls += `<path d="${topFace}" fill="#7a7d83" stroke="#4a4d53" stroke-width="0.6" stroke-linejoin="round"/>`;
+
+        // End caps if visible
+        const endCap1 = `M ${b1ax},${b1ay} L ${b1bx},${b1by} L ${t1bx},${t1by} L ${t1ax},${t1ay} Z`;
+        walls += `<path d="${endCap1}" fill="#b0b3b8" stroke="#5a5d63" stroke-width="0.6" stroke-linejoin="round"/>`;
+
+        return walls;
+    }
+
+    // === EXTERIOR WALLS ===
+    if (extWall && extWall.points.length >= 2) {
+        const pts = extWall.points.map(p => toLocal(p));
+        for (let i = 0; i < pts.length - 1; i++) {
+            svg += drawThickWall(pts[i], pts[i + 1], WALL_HEIGHT, 14);
+        }
+        if (pts.length >= 3) {
+            svg += drawThickWall(pts[pts.length - 1], pts[0], WALL_HEIGHT, 14);
+        }
+    }
+
+    // === INTERIOR WALLS ===
     elements.forEach(el => {
-        if (el.type === 'extwall' && el.points && el.points.length >= 2) {
-            const pts = el.points;
-            for (let i = 0; i < pts.length - 1; i++) {
-                buildWallSynchrony(
-                    [pts[i].x - cx, pts[i].y - cy],
-                    [pts[i+1].x - cx, pts[i+1].y - cy],
-                    WALL_HEIGHT, 12, extMat, wallTopMat
-                );
-            }
-            if (pts.length >= 3) {
-                buildWallSynchrony(
-                    [pts[pts.length-1].x - cx, pts[pts.length-1].y - cy],
-                    [pts[0].x - cx, pts[0].y - cy],
-                    WALL_HEIGHT, 12, extMat, wallTopMat
-                );
-            }
-        }
         if (el.type === 'intwall' && el.points && el.points.length >= 2) {
-            const pts = el.points;
+            const pts = el.points.map(p => toLocal(p));
             for (let i = 0; i < pts.length - 1; i++) {
-                buildWallSynchrony(
-                    [pts[i].x - cx, pts[i].y - cy],
-                    [pts[i+1].x - cx, pts[i+1].y - cy],
-                    WALL_HEIGHT * 0.95, 7, intMat, wallTopMat
-                );
+                svg += drawThickWall(pts[i], pts[i + 1], WALL_HEIGHT * 0.95, 9);
             }
         }
     });
 
-    // === DUCTS - clean white sheet metal ===
-    const ductMat = new THREE.MeshStandardMaterial({
-        color: 0xffffff,
-        roughness: 0.4,
-        metalness: 0.2
-    });
-    const ductEdgeMat = new THREE.MeshStandardMaterial({
-        color: 0xc0c0c4,
-        roughness: 0.5,
-        metalness: 0.3
-    });
-
+    // === DUCTS - white sheet metal at ceiling level ===
     elements.forEach(el => {
         if (el.type === 'duct' && el.points && el.points.length >= 2) {
-            for (let i = 0; i < el.points.length - 1; i++) {
-                buildDuctSynchrony(
-                    [el.points[i].x - cx, el.points[i].y - cy],
-                    [el.points[i+1].x - cx, el.points[i+1].y - cy],
-                    WALL_HEIGHT - 10, ductMat, ductEdgeMat
-                );
+            const pts = el.points.map(p => toLocal(p));
+            for (let i = 0; i < pts.length - 1; i++) {
+                svg += drawDuctSegment(pts[i], pts[i + 1], WALL_HEIGHT - 5);
             }
         }
     });
 
-    // === VAVs - blue cubes with white edges (Synchrony style) ===
-    const vavMat = new THREE.MeshStandardMaterial({
-        color: 0x1e3a8a,
-        roughness: 0.5,
-        metalness: 0.3,
-        emissive: 0x1e40af,
-        emissiveIntensity: 0.08
-    });
+    function drawDuctSegment(p1, p2, zLevel) {
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len < 1) return '';
 
-    elements.forEach(el => {
-        if (el.type === 'vav') {
-            const grp = new THREE.Group();
+        // Duct thickness (perpendicular to its length)
+        const thickness = 10;
+        const nx = -dy / len * thickness / 2;
+        const ny = dx / len * thickness / 2;
 
-            // Main cube
-            const geo = new THREE.BoxGeometry(28, 26, 28);
-            const m = new THREE.Mesh(geo, vavMat);
-            m.castShadow = true;
-            m.receiveShadow = true;
-            grp.add(m);
+        const p1a = { x: p1.x + nx, y: p1.y + ny };
+        const p1b = { x: p1.x - nx, y: p1.y - ny };
+        const p2a = { x: p2.x + nx, y: p2.y + ny };
+        const p2b = { x: p2.x - nx, y: p2.y - ny };
 
-            // White top accent
-            const topGeo = new THREE.BoxGeometry(28.5, 3, 28.5);
-            const topMat = new THREE.MeshStandardMaterial({
-                color: 0xffffff, roughness: 0.6
-            });
-            const topMesh = new THREE.Mesh(topGeo, topMat);
-            topMesh.position.y = 14.5;
-            grp.add(topMesh);
+        // Duct height
+        const ductH = 8;
 
-            grp.position.set(el.x - cx, WALL_HEIGHT - 20, el.y - cy);
-            scene.add(grp);
-        }
-    });
+        const [t1ax, t1ay] = projSVG(p1a.x, p1a.y, zLevel + ductH);
+        const [t2ax, t2ay] = projSVG(p2a.x, p2a.y, zLevel + ductH);
+        const [t1bx, t1by] = projSVG(p1b.x, p1b.y, zLevel + ductH);
+        const [t2bx, t2by] = projSVG(p2b.x, p2b.y, zLevel + ductH);
+        const [b1bx, b1by] = projSVG(p1b.x, p1b.y, zLevel);
+        const [b2bx, b2by] = projSVG(p2b.x, p2b.y, zLevel);
 
-    // === AHU - green with details ===
-    elements.forEach(el => {
-        if (el.type === 'ahu') {
-            const grp = new THREE.Group();
+        let d = '';
 
-            const mat = new THREE.MeshStandardMaterial({
-                color: 0x16a34a,
-                roughness: 0.5,
-                metalness: 0.3,
-                emissive: 0x15803d,
-                emissiveIntensity: 0.08
-            });
-            const geo = new THREE.BoxGeometry(60, 50, 50);
-            const m = new THREE.Mesh(geo, mat);
-            m.castShadow = true;
-            m.receiveShadow = true;
-            grp.add(m);
+        // Top face (white, brightest)
+        d += `<path d="M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="#ffffff" stroke="#aaaaaa" stroke-width="0.5"/>`;
 
-            // White top accent
-            const topGeo = new THREE.BoxGeometry(61, 3, 51);
-            const topMat = new THREE.MeshStandardMaterial({
-                color: 0xffffff, roughness: 0.6
-            });
-            const topMesh = new THREE.Mesh(topGeo, topMat);
-            topMesh.position.y = 26.5;
-            grp.add(topMesh);
+        // Front face (slightly darker)
+        d += `<path d="M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="#e8e8ec" stroke="#aaaaaa" stroke-width="0.5"/>`;
 
-            grp.position.set(el.x - cx, WALL_HEIGHT - 25, el.y - cy);
-            scene.add(grp);
-        }
-    });
+        return d;
+    }
 
-    // === DIFFUSERS - small white squares ===
-    const diffMat = new THREE.MeshStandardMaterial({
-        color: 0xffffff,
-        roughness: 0.5,
-        metalness: 0.15
-    });
-    const diffEdgeMat = new THREE.MeshStandardMaterial({
-        color: 0xa0a0a4,
-        roughness: 0.7
-    });
-
+    // === DIFFUSERS - small white squares on the ceiling ===
     elements.forEach(el => {
         if (el.type === 'diffuser') {
-            const grp = new THREE.Group();
-
-            const geo = new THREE.BoxGeometry(12, 2.5, 12);
-            const m = new THREE.Mesh(geo, diffMat);
-            m.castShadow = true;
-            grp.add(m);
-
-            // Frame around
-            const edgeGeo = new THREE.BoxGeometry(13, 1.5, 13);
-            const edgeMesh = new THREE.Mesh(edgeGeo, diffEdgeMat);
-            edgeMesh.position.y = -0.5;
-            grp.add(edgeMesh);
-
-            grp.position.set(el.x - cx, WALL_HEIGHT - 5, el.y - cy);
-            scene.add(grp);
+            const p = toLocal({ x: el.x, y: el.y });
+            const size = 8;
+            const z = WALL_HEIGHT - 2;
+            const corners = [
+                { x: p.x - size, y: p.y - size },
+                { x: p.x + size, y: p.y - size },
+                { x: p.x + size, y: p.y + size },
+                { x: p.x - size, y: p.y + size }
+            ];
+            const proj4 = corners.map(c => projSVG(c.x, c.y, z));
+            const path = `M ${proj4[0][0]},${proj4[0][1]} L ${proj4[1][0]},${proj4[1][1]} L ${proj4[2][0]},${proj4[2][1]} L ${proj4[3][0]},${proj4[3][1]} Z`;
+            svg += `<path d="${path}" fill="#ffffff" stroke="#666666" stroke-width="0.8"/>`;
         }
     });
 
-    // === Camera - Synchrony-style angle ===
-    const maxSize = Math.max(sizeX, sizeZ);
-    const dist = maxSize * 1.1;
-    camera.position.set(0, dist * 0.75, dist * 0.65);
-    initPos = camera.position.clone();
-    initTarget = new THREE.Vector3(0, WALL_HEIGHT * 0.25, 0);
-    controls.target.copy(initTarget);
-    controls.update();
+    // Helper: draw isometric cube
+    function drawIsoCube(centerX, centerY, halfSize, height, baseZ, topColor, leftColor, rightColor, strokeColor) {
+        const hs = halfSize;
+        // Bottom corners
+        const c = [
+            { x: centerX - hs, y: centerY - hs },
+            { x: centerX + hs, y: centerY - hs },
+            { x: centerX + hs, y: centerY + hs },
+            { x: centerX - hs, y: centerY + hs }
+        ];
+        // Project bottom and top corners
+        const b = c.map(p => projSVG(p.x, p.y, baseZ));
+        const t = c.map(p => projSVG(p.x, p.y, baseZ + height));
+
+        let cube = '';
+
+        // In iso projection (30 degrees), visible faces are:
+        // - Top (always visible from above)
+        // - Front-right face (corner 1->2, going right-down)
+        // - Front-left face (corner 2->3, going left-down)
+        // Actually since we use (x-y) and (x+y) projection:
+        // - Top face is visible
+        // - The face on the +y side (front) is visible
+        // - The face on the +x side (right) is visible
+
+        // Top face
+        cube += `<path d="M ${t[0][0]},${t[0][1]} L ${t[1][0]},${t[1][1]} L ${t[2][0]},${t[2][1]} L ${t[3][0]},${t[3][1]} Z" fill="${topColor}" stroke="${strokeColor}" stroke-width="0.8" stroke-linejoin="round"/>`;
+
+        // Front face (corners 2-3, bottom -> top)
+        cube += `<path d="M ${b[3][0]},${b[3][1]} L ${b[2][0]},${b[2][1]} L ${t[2][0]},${t[2][1]} L ${t[3][0]},${t[3][1]} Z" fill="${leftColor}" stroke="${strokeColor}" stroke-width="0.8" stroke-linejoin="round"/>`;
+
+        // Right face (corners 1-2, bottom -> top)
+        cube += `<path d="M ${b[1][0]},${b[1][1]} L ${b[2][0]},${b[2][1]} L ${t[2][0]},${t[2][1]} L ${t[1][0]},${t[1][1]} Z" fill="${rightColor}" stroke="${strokeColor}" stroke-width="0.8" stroke-linejoin="round"/>`;
+
+        return cube;
+    }
+
+    // === VAVs - blue isometric cubes ===
+    elements.forEach(el => {
+        if (el.type === 'vav') {
+            const p = toLocal({ x: el.x, y: el.y });
+            const baseZ = WALL_HEIGHT - 22;
+            svg += drawIsoCube(p.x, p.y, 11, 22, baseZ,
+                '#2563eb',  // top (brightest)
+                '#1e40af',  // front (medium)
+                '#1e3a8a',  // right (darkest)
+                '#0c1c5c'); // stroke
+        }
+    });
+
+    // === AHU - green box (larger) ===
+    elements.forEach(el => {
+        if (el.type === 'ahu') {
+            const p = toLocal({ x: el.x, y: el.y });
+            const baseZ = WALL_HEIGHT - 30;
+            svg += drawIsoCube(p.x, p.y, 22, 30, baseZ,
+                '#22c55e',
+                '#16a34a',
+                '#15803d',
+                '#0a4220');
+        }
+    });
+
+    svg += '</svg>';
+    return svg;
 }
 
-function buildWallSynchrony(p1, p2, height, thickness, sideMat, topMat) {
-    const dx = p2[0] - p1[0], dz = p2[1] - p1[1];
-    const length = Math.sqrt(dx * dx + dz * dz);
-    if (length < 5) return;
-    const angle = Math.atan2(dz, dx);
-    const grp = new THREE.Group();
+const svgContent = generateSVG();
+document.getElementById('svgViewer').innerHTML = svgContent;
 
-    // Main wall body
-    const geo = new THREE.BoxGeometry(length, height, thickness);
-    const m = new THREE.Mesh(geo, sideMat);
-    m.position.y = height / 2;
-    m.castShadow = true;
-    m.receiveShadow = true;
-    grp.add(m);
-
-    // Darker top cap (Synchrony style)
-    const topGeo = new THREE.BoxGeometry(length + 0.5, 2, thickness + 0.5);
-    const topMesh = new THREE.Mesh(topGeo, topMat);
-    topMesh.position.y = height + 1;
-    topMesh.castShadow = true;
-    grp.add(topMesh);
-
-    grp.position.set((p1[0] + p2[0]) / 2, 0, (p1[1] + p2[1]) / 2);
-    grp.rotation.y = -angle;
-    scene.add(grp);
-}
-
-function buildDuctSynchrony(p1, p2, yPos, mainMat, edgeMat) {
-    const dx = p2[0] - p1[0], dz = p2[1] - p1[1];
-    const length = Math.sqrt(dx * dx + dz * dz);
-    if (length < 5) return;
-    const angle = Math.atan2(dz, dx);
-
-    const grp = new THREE.Group();
-
-    // Main duct body
-    const geo = new THREE.BoxGeometry(length, 8, 14);
-    const m = new THREE.Mesh(geo, mainMat);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    grp.add(m);
-
-    // Side edge for definition
-    const edgeGeo1 = new THREE.BoxGeometry(length, 1, 1);
-    const edge1 = new THREE.Mesh(edgeGeo1, edgeMat);
-    edge1.position.set(0, 4, 7);
-    grp.add(edge1);
-
-    const edge2 = new THREE.Mesh(edgeGeo1, edgeMat);
-    edge2.position.set(0, 4, -7);
-    grp.add(edge2);
-
-    grp.position.set((p1[0] + p2[0]) / 2, yPos, (p1[1] + p2[1]) / 2);
-    grp.rotation.y = -angle;
-    scene.add(grp);
-}
-
-function animate() {
-    requestAnimationFrame(animate);
-    controls.update();
-    renderer.render(scene, camera);
-}
-
-function onResize() {
-    const c = document.getElementById('viewer');
-    camera.aspect = c.clientWidth / c.clientHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(c.clientWidth, c.clientHeight);
-}
-
-function resetView() {
-    camera.position.copy(initPos);
-    controls.target.copy(initTarget);
-    controls.update();
-}
-
-function topView() {
-    const max = Math.max(data.image_width, data.image_height);
-    camera.position.set(0, max * 1.5, 0.1);
-    controls.target.set(0, 0, 0);
-    controls.update();
-}
-
-function synchView() {
-    const max = Math.max(data.image_width, data.image_height);
-    camera.position.set(0, max * 0.75, max * 0.65);
-    controls.target.set(0, 20, 0);
-    controls.update();
-}
-
-function screenshot() {
-    renderer.render(scene, camera);
-    const url = renderer.domElement.toDataURL('image/png');
+function downloadSVG() {
+    const blob = new Blob([svgContent], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.download = 'bas_synchrony_3d.png';
+    link.download = 'bas_graphic.svg';
     link.href = url;
     link.click();
+    URL.revokeObjectURL(url);
 }
 
-init();
+function downloadPNG() {
+    const svgBlob = new Blob([svgContent], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(svgBlob);
+    const img = new Image();
+    img.onload = function() {
+        // Make PNG 2x size for higher quality
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width * 2;
+        canvas.height = img.height * 2;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(function(blob) {
+            const purl = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.download = 'bas_graphic.png';
+            link.href = purl;
+            link.click();
+            URL.revokeObjectURL(purl);
+        }, 'image/png');
+        URL.revokeObjectURL(url);
+    };
+    img.src = url;
+}
 </script>
 </body>
 </html>'''
@@ -1067,8 +992,8 @@ def process():
         return jsonify({"success": False, "error": str(e)})
 
 
-@app.route("/render3d")
-def render3d():
+@app.route("/result")
+def result():
     try:
         with open(os.path.join(OUTPUT_FOLDER, "detection.json"), "r") as f:
             detection = json.load(f)
