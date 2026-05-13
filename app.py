@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, jsonify
+from flask import Flask, request, render_template_string, jsonify, redirect, make_response
 import os
 import base64
 import json
@@ -6,6 +6,10 @@ import cv2
 import fitz
 
 app = Flask(__name__)
+
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "1234")
+SECRET_KEY = os.environ.get("SECRET_KEY", "change_this_secret")
+app.secret_key = SECRET_KEY
 
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
@@ -27,6 +31,42 @@ def pdf_to_png(pdf_path, out_path):
     pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
     pix.save(out_path)
     doc.close()
+
+
+LOGIN_PAGE = '''<!DOCTYPE html>
+<html>
+<head>
+<title>BAS Generator Login</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background:#0d0f14; color:white; font-family:'Segoe UI', Arial, sans-serif; min-height:100vh; display:flex; align-items:center; justify-content:center; }
+.card { background:#181b24; border:1px solid #2a3050; border-radius:24px; padding:45px; width:420px; text-align:center; box-shadow:0 0 60px rgba(0,0,0,0.65); }
+.logo { font-size:48px; margin-bottom:12px; }
+h1 { font-size:26px; margin-bottom:6px; background:linear-gradient(135deg,#2d89ef,#b388ff); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+.sub { color:#8b93ad; font-size:14px; margin-bottom:24px; }
+input { width:100%; padding:15px; border-radius:12px; border:1px solid #2a3050; background:#10131a; color:white; font-size:16px; outline:none; }
+input:focus { border-color:#2d89ef; }
+button { width:100%; padding:15px; border:none; border-radius:12px; margin-top:18px; background:linear-gradient(135deg,#1a6fd4,#2d89ef); color:white; font-size:16px; font-weight:700; cursor:pointer; }
+.error { margin-top:14px; color:#ff6b6b; font-size:13px; }
+.footer { color:#3a4060; font-size:11px; margin-top:24px; }
+</style>
+</head>
+<body>
+<div class="card">
+<div class="logo">&#128274;</div>
+<h1>BAS Generator v20</h1>
+<p class="sub">Private Access</p>
+<form method="POST" action="/login">
+<input type="password" name="password" placeholder="Enter password" required autofocus>
+<button type="submit">Login</button>
+</form>
+{% if error %}
+<div class="error">Invalid password. Try again.</div>
+{% endif %}
+<div class="footer">Made by Paolo V. and Emmanuel R.</div>
+</div>
+</body>
+</html>'''
 
 
 HOME_PAGE = '''<!DOCTYPE html>
@@ -933,6 +973,42 @@ function downloadPNG() {
 </script>
 </body>
 </html>'''
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        if password == APP_PASSWORD:
+            response = make_response(redirect("/"))
+            response.set_cookie(
+                "bas_auth",
+                APP_PASSWORD,
+                max_age=60 * 60 * 24 * 7,
+                httponly=True,
+                secure=True,
+                samesite="Lax"
+            )
+            return response
+        return render_template_string(LOGIN_PAGE, error=True)
+    return render_template_string(LOGIN_PAGE, error=False)
+
+
+@app.route("/logout")
+def logout():
+    response = make_response(redirect("/login"))
+    response.delete_cookie("bas_auth")
+    return response
+
+
+@app.before_request
+def require_login():
+    allowed_endpoints = ["login", "static"]
+    if request.endpoint in allowed_endpoints:
+        return
+    if request.cookies.get("bas_auth") == APP_PASSWORD:
+        return
+    return redirect("/login")
 
 
 @app.route("/")
