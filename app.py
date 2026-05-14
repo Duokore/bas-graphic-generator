@@ -63,7 +63,7 @@ button { width:100%; padding:15px; border:none; border-radius:12px; margin-top:1
 {% if error %}
 <div class="error">Invalid password. Try again.</div>
 {% endif %}
-<div class="footer">Made by Paolo V. and Emmanuel R.</div>
+<div class="footer">Made by Paolo Vasquez</div>
 </div>
 </body>
 </html>'''
