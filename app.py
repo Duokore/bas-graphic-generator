@@ -86,19 +86,31 @@ def detect_walls_hough(binary_clean, min_line_length=50, max_line_gap=15):
 
 
 def snap_to_orthogonal(lines, angle_tolerance=5):
-    """Snap lines to perfectly horizontal or vertical (0 or 90 degrees)."""
+    """Snap lines to perfectly horizontal or vertical (0 or 90 degrees).
+    Accepts Hough output (N, 1, 4) or list of [x1,y1,x2,y2]."""
     snapped = []
     for line in lines:
-        x1, y1, x2, y2 = line[0]
+        # Handle both Hough format [[x1,y1,x2,y2]] and flat [x1,y1,x2,y2]
+        try:
+            if hasattr(line, '__len__') and len(line) == 4:
+                x1, y1, x2, y2 = line
+            elif hasattr(line, '__len__') and len(line) == 1:
+                x1, y1, x2, y2 = line[0]
+            else:
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
         dx = x2 - x1
         dy = y2 - y1
+        if dx == 0 and dy == 0:
+            continue
         angle = math.degrees(math.atan2(dy, dx))
 
-        # Normalize angle to 0-180
         if angle < 0:
             angle += 180
 
-        # Snap to 0 (horizontal) or 90 (vertical)
         if angle < angle_tolerance or angle > 180 - angle_tolerance:
             # Horizontal
             y_avg = (y1 + y2) // 2
@@ -107,7 +119,6 @@ def snap_to_orthogonal(lines, angle_tolerance=5):
             # Vertical
             x_avg = (x1 + x2) // 2
             snapped.append([x_avg, min(y1, y2), x_avg, max(y1, y2)])
-        # Skip diagonal lines (rare in floor plans)
 
     return snapped
 
@@ -264,8 +275,7 @@ def detect_architecture(image_path, crop_box=None):
         }
 
     # Step 3: Snap to orthogonal
-    snapped = snap_to_orthogonal([[l] for l in raw_lines] if hasattr(raw_lines[0], '__len__') else raw_lines)
-    # Hough returns array shape (N, 1, 4) - flatten
+    # Hough returns array shape (N, 1, 4) - already correct format for snap_to_orthogonal
     snapped = snap_to_orthogonal(raw_lines)
 
     # Step 4: Merge collinear lines
@@ -1312,18 +1322,28 @@ def upload():
     detected_message = ""
 
     if mode == "arch":
-        result = detect_architecture(UPLOAD_IMAGE_PATH)
-        if result:
-            initial_elements = result["elements"]
-            stats = result["stats"]
-            n_walls = sum(1 for e in initial_elements if e.get("type") in ("extwall", "intwall"))
-            detected_message = f"Auto-detected architecture: {n_walls} walls extracted from {stats['lines_raw']} raw lines. Review and adjust!"
+        try:
+            result = detect_architecture(UPLOAD_IMAGE_PATH)
+            if result:
+                initial_elements = result["elements"]
+                stats = result["stats"]
+                n_walls = sum(1 for e in initial_elements if e.get("type") in ("extwall", "intwall"))
+                detected_message = f"Auto-detected architecture: {n_walls} walls extracted from {stats['lines_raw']} raw lines. Review and adjust!"
+            else:
+                detected_message = "Detection ran but found nothing. Try Manual mode."
+        except Exception as e:
+            detected_message = f"Detection error: {str(e)}. Continuing in manual mode."
+            initial_elements = []
     elif mode == "color":
-        result = auto_detect_colors(UPLOAD_IMAGE_PATH)
-        if result:
-            initial_elements = result["elements"]
-            n_det = len(initial_elements)
-            detected_message = f"Auto-detected by colors: {n_det} HVAC elements found."
+        try:
+            result = auto_detect_colors(UPLOAD_IMAGE_PATH)
+            if result:
+                initial_elements = result["elements"]
+                n_det = len(initial_elements)
+                detected_message = f"Auto-detected by colors: {n_det} HVAC elements found."
+        except Exception as e:
+            detected_message = f"Color detection error: {str(e)}. Continuing in manual mode."
+            initial_elements = []
 
     return render_template_string(
         EDITOR_PAGE,
