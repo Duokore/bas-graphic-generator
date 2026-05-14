@@ -54,7 +54,7 @@ button { width:100%; padding:15px; border:none; border-radius:12px; margin-top:1
 <body>
 <div class="card">
 <div class="logo">&#128274;</div>
-<h1>BAS Generator v20</h1>
+<h1>BAS Generator v21</h1>
 <p class="sub">Private Access</p>
 <form method="POST" action="/login">
 <input type="password" name="password" placeholder="Enter password" required autofocus>
@@ -72,7 +72,7 @@ button { width:100%; padding:15px; border:none; border-radius:12px; margin-top:1
 HOME_PAGE = '''<!DOCTYPE html>
 <html>
 <head>
-<title>BAS Generator v20 - SVG Isometric</title>
+<title>BAS Generator v21 - Synchrony Pro</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
@@ -94,13 +94,13 @@ input[type=file] { background: transparent; color: #aab0c4; border: none; font-s
 <body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v20 <span class="badge">SVG ISOMETRIC</span></h1>
-<p class="sub">True Tracer Synchrony style - SVG vector graphics</p>
+<h1>BAS Generator v21 <span class="badge">SYNCHRONY PRO</span></h1>
+<p class="sub">Professional architectural isometric BAS graphics</p>
 <div style="text-align: left; margin-bottom: 24px;">
 <div class="feature"><div class="color-dot" style="background:#9333ea"></div> Click corners for walls (always straight)</div>
-<div class="feature"><div class="color-dot" style="background:#1e40af"></div> Click to place VAVs (isometric blue cubes)</div>
-<div class="feature"><div class="color-dot" style="background:#16a34a"></div> Click to place AHU (green box)</div>
-<div class="feature"><div class="color-dot" style="background:#fff;border:1px solid #888"></div> Two clicks for white duct lines</div>
+<div class="feature"><div class="color-dot" style="background:#1e40af"></div> Click to place VAVs (beveled blue cubes)</div>
+<div class="feature"><div class="color-dot" style="background:#16a34a"></div> Click to place AHU (beveled green box)</div>
+<div class="feature"><div class="color-dot" style="background:#fff;border:1px solid #888"></div> Two clicks for trunk-branch duct lines</div>
 <div class="feature"><div class="color-dot" style="background:#444"></div> Synchrony-style 2D isometric output</div>
 </div>
 <form action="/upload" method="post" enctype="multipart/form-data">
@@ -119,7 +119,7 @@ input[type=file] { background: transparent; color: #aab0c4; border: none; font-s
 EDITOR_PAGE = '''<!DOCTYPE html>
 <html>
 <head>
-<title>CAD Editor v20</title>
+<title>CAD Editor v21</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; padding: 8px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
@@ -149,7 +149,7 @@ canvas { display: block; }
 </head>
 <body>
 <div class="topbar">
-<h1>CAD Editor v20 &mdash; Click to draw, double-click to finish</h1>
+<h1>CAD Editor v21 &mdash; Click to draw, double-click to finish</h1>
 <div style="display: flex; gap: 6px;">
 <button onclick="undo()" class="action-btn btn-gray">&#8617; Undo</button>
 <button onclick="clearAll()" class="action-btn btn-red">Clear</button>
@@ -558,7 +558,7 @@ async function generate() {
 RESULT_PAGE = '''<!DOCTYPE html>
 <html>
 <head>
-<title>BAS Graphic Result</title>
+<title>BAS Graphic Result v21</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; padding: 12px; }
@@ -578,7 +578,7 @@ h1 { text-align: center; font-size: 22px; margin-bottom: 4px; background: linear
 </style>
 </head>
 <body>
-<h1>Synchrony-Style BAS Graphic</h1>
+<h1>Synchrony-Style BAS Graphic v21</h1>
 <p class="sub">SVG Isometric Render - Ready for Tracer Synchrony / Niagara</p>
 <div class="stats">
 <div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
@@ -595,34 +595,27 @@ h1 { text-align: center; font-size: 22px; margin-bottom: 4px; background: linear
 <a href="/editor" class="btn btn-gray">Edit Markings</a>
 <a href="/" class="btn btn-gray">New Plan</a>
 </div>
-<div class="footer">Made by Paolo V. and Emmanuel R.</div>
+<div class="footer">Made by Paolo V. R.</div>
 
 <script>
 const data = {{ detection_json | safe }};
 
-// Isometric projection constants
-const ISO_ANGLE_X = Math.PI / 6;  // 30 degrees
-const ISO_ANGLE_Y = Math.PI / 6;
-const COS30 = Math.cos(ISO_ANGLE_X);
-const SIN30 = Math.sin(ISO_ANGLE_X);
+// Isometric projection: 30 degrees on x and y axes
+const ISO_ANGLE = Math.PI / 6;
+const COS30 = Math.cos(ISO_ANGLE);
+const SIN30 = Math.sin(ISO_ANGLE);
 
-// Project 3D point to 2D isometric screen
 function isoProject(x, y, z) {
-    // Standard isometric: x goes right-down, y goes left-down, z goes up
     const sx = (x - y) * COS30;
     const sy = (x + y) * SIN30 - z;
     return [sx, sy];
 }
 
 function generateSVG() {
-    const imgW = data.image_width;
-    const imgH = data.image_height;
     const elements = data.elements || [];
-
-    // Find building bounds
     const extWall = elements.find(e => e.type === 'extwall' && e.points && e.points.length >= 3);
 
-    let minX = 0, maxX = imgW, minY = 0, maxY = imgH;
+    let minX = 0, maxX = data.image_width, minY = 0, maxY = data.image_height;
     if (extWall) {
         const xs = extWall.points.map(p => p.x);
         const ys = extWall.points.map(p => p.y);
@@ -631,17 +624,15 @@ function generateSVG() {
         minY = Math.min(...ys);
         maxY = Math.max(...ys);
     }
-    const buildingCx = (minX + maxX) / 2;
-    const buildingCy = (minY + maxY) / 2;
+    const bcx = (minX + maxX) / 2;
+    const bcy = (minY + maxY) / 2;
 
-    const WALL_HEIGHT = 60;
+    const WALL_HEIGHT = 55;
 
-    // Transform image coord to centered coord
     function toLocal(p) {
-        return { x: p.x - buildingCx, y: p.y - buildingCy };
+        return { x: p.x - bcx, y: p.y - bcy };
     }
 
-    // Project to isometric SVG space
     function proj(x, y, z = 0) {
         return isoProject(x, y, z);
     }
@@ -655,7 +646,7 @@ function generateSVG() {
         toLocal({ x: minX, y: maxY })
     ];
     for (const c of corners) {
-        for (const z of [0, WALL_HEIGHT]) {
+        for (const z of [0, WALL_HEIGHT + 20]) {
             const [sx, sy] = proj(c.x, c.y, z);
             svgMinX = Math.min(svgMinX, sx);
             svgMaxX = Math.max(svgMaxX, sx);
@@ -664,7 +655,7 @@ function generateSVG() {
         }
     }
 
-    const padding = 100;
+    const padding = 80;
     const svgW = svgMaxX - svgMinX + padding * 2;
     const svgH = svgMaxY - svgMinY + padding * 2;
     const offsetX = -svgMinX + padding;
@@ -675,38 +666,105 @@ function generateSVG() {
         return [sx + offsetX, sy + offsetY];
     }
 
-    // Build SVG
     let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${svgW} ${svgH}" width="${svgW}" height="${svgH}">`;
+    svg += `<rect width="${svgW}" height="${svgH}" fill="#0a0a0d"/>`;
 
-    // Background
-    svg += `<rect width="${svgW}" height="${svgH}" fill="#000000"/>`;
-
-    // Defs - filters and patterns
+    // === DEFS: gradients, patterns, filters ===
     svg += `<defs>`;
 
-    // Floor tile pattern
-    svg += `<pattern id="floorTile" width="40" height="40" patternUnits="userSpaceOnUse" patternTransform="rotate(0)">`;
-    svg += `<rect width="40" height="40" fill="#c4c4c8"/>`;
-    svg += `<path d="M 0 0 L 40 0 M 0 0 L 0 40" stroke="#ffffff" stroke-width="0.8" opacity="0.6"/>`;
+    // Subtle isometric floor tile - diamond shape with soft gray
+    const tw = 24 * COS30 * 2;
+    const th = 24 * SIN30 * 2;
+    svg += `<pattern id="isoFloor" width="${tw}" height="${th}" patternUnits="userSpaceOnUse">`;
+    svg += `<polygon points="${tw/2},0 ${tw},${th/2} ${tw/2},${th} 0,${th/2}" fill="#d8d8dc" stroke="#cdcdd1" stroke-width="0.5"/>`;
     svg += `</pattern>`;
 
-    // Floor pattern transformed to isometric
-    const tileSize = 25;
-    svg += `<pattern id="isoTile" width="${tileSize * COS30 * 2}" height="${tileSize * SIN30 * 2}" patternUnits="userSpaceOnUse">`;
-    svg += `<polygon points="${tileSize * COS30},0 ${tileSize * COS30 * 2},${tileSize * SIN30} ${tileSize * COS30},${tileSize * SIN30 * 2} 0,${tileSize * SIN30}" fill="#cfcfd3" stroke="#ffffff" stroke-width="0.5" opacity="0.85"/>`;
-    svg += `</pattern>`;
+    // Wall side gradient (lighter at top, darker at bottom)
+    svg += `<linearGradient id="extWallSide" x1="0%" y1="0%" x2="0%" y2="100%">`;
+    svg += `<stop offset="0%" stop-color="#c4c4ca"/>`;
+    svg += `<stop offset="100%" stop-color="#8e8e94"/>`;
+    svg += `</linearGradient>`;
+
+    svg += `<linearGradient id="extWallTop" x1="0%" y1="0%" x2="100%" y2="100%">`;
+    svg += `<stop offset="0%" stop-color="#e8e8ec"/>`;
+    svg += `<stop offset="100%" stop-color="#b8b8bc"/>`;
+    svg += `</linearGradient>`;
+
+    svg += `<linearGradient id="extWallEnd" x1="0%" y1="0%" x2="100%" y2="0%">`;
+    svg += `<stop offset="0%" stop-color="#bababf"/>`;
+    svg += `<stop offset="100%" stop-color="#9b9ba0"/>`;
+    svg += `</linearGradient>`;
+
+    svg += `<linearGradient id="intWallSide" x1="0%" y1="0%" x2="0%" y2="100%">`;
+    svg += `<stop offset="0%" stop-color="#d0d0d4"/>`;
+    svg += `<stop offset="100%" stop-color="#a4a4a8"/>`;
+    svg += `</linearGradient>`;
+
+    svg += `<linearGradient id="intWallTop" x1="0%" y1="0%" x2="100%" y2="100%">`;
+    svg += `<stop offset="0%" stop-color="#ebebef"/>`;
+    svg += `<stop offset="100%" stop-color="#c4c4c8"/>`;
+    svg += `</linearGradient>`;
+
+    // Duct gradients
+    svg += `<linearGradient id="ductTop" x1="0%" y1="0%" x2="0%" y2="100%">`;
+    svg += `<stop offset="0%" stop-color="#ffffff"/>`;
+    svg += `<stop offset="100%" stop-color="#ececf0"/>`;
+    svg += `</linearGradient>`;
+
+    svg += `<linearGradient id="ductFront" x1="0%" y1="0%" x2="0%" y2="100%">`;
+    svg += `<stop offset="0%" stop-color="#dadade"/>`;
+    svg += `<stop offset="100%" stop-color="#b8b8bc"/>`;
+    svg += `</linearGradient>`;
+
+    // VAV gradients
+    svg += `<linearGradient id="vavTop" x1="0%" y1="0%" x2="100%" y2="100%">`;
+    svg += `<stop offset="0%" stop-color="#3b6df0"/>`;
+    svg += `<stop offset="100%" stop-color="#1e40af"/>`;
+    svg += `</linearGradient>`;
+
+    svg += `<linearGradient id="vavFront" x1="0%" y1="0%" x2="0%" y2="100%">`;
+    svg += `<stop offset="0%" stop-color="#1e3a8a"/>`;
+    svg += `<stop offset="100%" stop-color="#152a6e"/>`;
+    svg += `</linearGradient>`;
+
+    svg += `<linearGradient id="vavRight" x1="0%" y1="0%" x2="100%" y2="0%">`;
+    svg += `<stop offset="0%" stop-color="#1e40af"/>`;
+    svg += `<stop offset="100%" stop-color="#0c1f5c"/>`;
+    svg += `</linearGradient>`;
+
+    // AHU gradients
+    svg += `<linearGradient id="ahuTop" x1="0%" y1="0%" x2="100%" y2="100%">`;
+    svg += `<stop offset="0%" stop-color="#34d365"/>`;
+    svg += `<stop offset="100%" stop-color="#16a34a"/>`;
+    svg += `</linearGradient>`;
+
+    svg += `<linearGradient id="ahuFront" x1="0%" y1="0%" x2="0%" y2="100%">`;
+    svg += `<stop offset="0%" stop-color="#15803d"/>`;
+    svg += `<stop offset="100%" stop-color="#0a5828"/>`;
+    svg += `</linearGradient>`;
+
+    svg += `<linearGradient id="ahuRight" x1="0%" y1="0%" x2="100%" y2="0%">`;
+    svg += `<stop offset="0%" stop-color="#16a34a"/>`;
+    svg += `<stop offset="100%" stop-color="#0c5a26"/>`;
+    svg += `</linearGradient>`;
 
     // Soft shadow filter
-    svg += `<filter id="softShadow" x="-50%" y="-50%" width="200%" height="200%">`;
-    svg += `<feGaussianBlur in="SourceAlpha" stdDeviation="3"/>`;
-    svg += `<feOffset dx="2" dy="4" result="offsetblur"/>`;
+    svg += `<filter id="softShadow" x="-30%" y="-30%" width="160%" height="160%">`;
+    svg += `<feGaussianBlur in="SourceAlpha" stdDeviation="2"/>`;
+    svg += `<feOffset dx="1.5" dy="3"/>`;
     svg += `<feComponentTransfer><feFuncA type="linear" slope="0.4"/></feComponentTransfer>`;
     svg += `<feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>`;
     svg += `</filter>`;
 
+    // Floor inner shadow - subtle ambient occlusion near walls
+    svg += `<filter id="floorAO" x="-10%" y="-10%" width="120%" height="120%">`;
+    svg += `<feGaussianBlur in="SourceAlpha" stdDeviation="4" result="blur"/>`;
+    svg += `<feComposite in="blur" in2="SourceAlpha" operator="arithmetic" k2="-1" k3="1"/>`;
+    svg += `</filter>`;
+
     svg += `</defs>`;
 
-    // === FLOOR (from exterior wall polygon) ===
+    // === FLOOR with isometric tile pattern ===
     if (extWall) {
         const pts = extWall.points.map(p => toLocal(p));
         let floorPath = '';
@@ -715,29 +773,13 @@ function generateSVG() {
             floorPath += (i === 0 ? 'M' : 'L') + sx + ',' + sy + ' ';
         }
         floorPath += 'Z';
-        svg += `<path d="${floorPath}" fill="url(#isoTile)" stroke="#a8a8ac" stroke-width="0.5"/>`;
+        svg += `<path d="${floorPath}" fill="url(#isoFloor)" stroke="#a0a0a4" stroke-width="0.4"/>`;
+        // Subtle inner shadow near walls
+        svg += `<path d="${floorPath}" fill="none" stroke="#888" stroke-width="1.2" opacity="0.18"/>`;
     }
 
-    // Helper to draw an isometric wall segment (two endpoints + height)
-    function drawWall(p1, p2, height, fillSide, fillTop, strokeColor) {
-        const [b1x, b1y] = projSVG(p1.x, p1.y, 0);
-        const [b2x, b2y] = projSVG(p2.x, p2.y, 0);
-        const [t1x, t1y] = projSVG(p1.x, p1.y, height);
-        const [t2x, t2y] = projSVG(p2.x, p2.y, height);
-
-        // Side face (the visible wall face)
-        const sidePath = `M ${b1x},${b1y} L ${b2x},${b2y} L ${t2x},${t2y} L ${t1x},${t1y} Z`;
-        let walls = `<path d="${sidePath}" fill="${fillSide}" stroke="${strokeColor}" stroke-width="0.7" stroke-linejoin="round"/>`;
-
-        // Top edge highlight
-        walls += `<line x1="${t1x}" y1="${t1y}" x2="${t2x}" y2="${t2y}" stroke="${fillTop}" stroke-width="2.5"/>`;
-
-        return walls;
-    }
-
-    // Helper to draw thick wall (with depth on top showing thickness)
-    function drawThickWall(p1, p2, height, thickness) {
-        // Compute perpendicular offset for thickness
+    // === Helper: draw thick wall with gradient faces and rounded look ===
+    function drawThickWall(p1, p2, height, thickness, sideGrad, topGrad, endGrad, stroke) {
         const dx = p2.x - p1.x;
         const dy = p2.y - p1.y;
         const len = Math.sqrt(dx * dx + dy * dy);
@@ -762,19 +804,17 @@ function generateSVG() {
 
         let walls = '';
 
-        // Front face (visible side - the one further in iso projection)
-        // In iso, the "back" side is the one with higher y in image
-        // We draw the side that's visible from the camera
-        const visibleSide = `M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z`;
-        walls += `<path d="${visibleSide}" fill="#9a9da3" stroke="#5a5d63" stroke-width="0.6" stroke-linejoin="round"/>`;
+        // Visible front face
+        const front = `M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z`;
+        walls += `<path d="${front}" fill="${sideGrad}" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
 
-        // Top face (visible from above due to iso angle)
-        const topFace = `M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z`;
-        walls += `<path d="${topFace}" fill="#7a7d83" stroke="#4a4d53" stroke-width="0.6" stroke-linejoin="round"/>`;
+        // Top face
+        const top = `M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z`;
+        walls += `<path d="${top}" fill="${topGrad}" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
 
-        // End caps if visible
-        const endCap1 = `M ${b1ax},${b1ay} L ${b1bx},${b1by} L ${t1bx},${t1by} L ${t1ax},${t1ay} Z`;
-        walls += `<path d="${endCap1}" fill="#b0b3b8" stroke="#5a5d63" stroke-width="0.6" stroke-linejoin="round"/>`;
+        // End cap on starting side
+        const endCap = `M ${b1ax},${b1ay} L ${b1bx},${b1by} L ${t1bx},${t1by} L ${t1ax},${t1ay} Z`;
+        walls += `<path d="${endCap}" fill="${endGrad}" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
 
         return walls;
     }
@@ -783,41 +823,34 @@ function generateSVG() {
     if (extWall && extWall.points.length >= 2) {
         const pts = extWall.points.map(p => toLocal(p));
         for (let i = 0; i < pts.length - 1; i++) {
-            svg += drawThickWall(pts[i], pts[i + 1], WALL_HEIGHT, 14);
+            svg += drawThickWall(pts[i], pts[i + 1], WALL_HEIGHT, 14,
+                'url(#extWallSide)', 'url(#extWallTop)', 'url(#extWallEnd)', '#5a5d63');
         }
         if (pts.length >= 3) {
-            svg += drawThickWall(pts[pts.length - 1], pts[0], WALL_HEIGHT, 14);
+            svg += drawThickWall(pts[pts.length - 1], pts[0], WALL_HEIGHT, 14,
+                'url(#extWallSide)', 'url(#extWallTop)', 'url(#extWallEnd)', '#5a5d63');
         }
     }
 
-    // === INTERIOR WALLS ===
+    // === INTERIOR WALLS - thinner ===
     elements.forEach(el => {
         if (el.type === 'intwall' && el.points && el.points.length >= 2) {
             const pts = el.points.map(p => toLocal(p));
             for (let i = 0; i < pts.length - 1; i++) {
-                svg += drawThickWall(pts[i], pts[i + 1], WALL_HEIGHT * 0.95, 9);
+                svg += drawThickWall(pts[i], pts[i + 1], WALL_HEIGHT * 0.92, 8,
+                    'url(#intWallSide)', 'url(#intWallTop)', 'url(#extWallEnd)', '#6a6d73');
             }
         }
     });
 
-    // === DUCTS - white sheet metal at ceiling level ===
-    elements.forEach(el => {
-        if (el.type === 'duct' && el.points && el.points.length >= 2) {
-            const pts = el.points.map(p => toLocal(p));
-            for (let i = 0; i < pts.length - 1; i++) {
-                svg += drawDuctSegment(pts[i], pts[i + 1], WALL_HEIGHT - 5);
-            }
-        }
-    });
-
+    // === DUCTS with depth and shadow ===
     function drawDuctSegment(p1, p2, zLevel) {
         const dx = p2.x - p1.x;
         const dy = p2.y - p1.y;
         const len = Math.sqrt(dx * dx + dy * dy);
         if (len < 1) return '';
 
-        // Duct thickness (perpendicular to its length)
-        const thickness = 10;
+        const thickness = 11;
         const nx = -dy / len * thickness / 2;
         const ny = dx / len * thickness / 2;
 
@@ -826,8 +859,7 @@ function generateSVG() {
         const p2a = { x: p2.x + nx, y: p2.y + ny };
         const p2b = { x: p2.x - nx, y: p2.y - ny };
 
-        // Duct height
-        const ductH = 8;
+        const ductH = 7;
 
         const [t1ax, t1ay] = projSVG(p1a.x, p1a.y, zLevel + ductH);
         const [t2ax, t2ay] = projSVG(p2a.x, p2a.y, zLevel + ductH);
@@ -835,24 +867,57 @@ function generateSVG() {
         const [t2bx, t2by] = projSVG(p2b.x, p2b.y, zLevel + ductH);
         const [b1bx, b1by] = projSVG(p1b.x, p1b.y, zLevel);
         const [b2bx, b2by] = projSVG(p2b.x, p2b.y, zLevel);
+        const [b1ax, b1ay] = projSVG(p1a.x, p1a.y, zLevel);
 
         let d = '';
 
-        // Top face (white, brightest)
-        d += `<path d="M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="#ffffff" stroke="#aaaaaa" stroke-width="0.5"/>`;
-
-        // Front face (slightly darker)
-        d += `<path d="M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="#e8e8ec" stroke="#aaaaaa" stroke-width="0.5"/>`;
+        // Top face
+        d += `<path d="M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="url(#ductTop)" stroke="#aaaaae" stroke-width="0.4"/>`;
+        // Front face
+        d += `<path d="M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="url(#ductFront)" stroke="#aaaaae" stroke-width="0.4"/>`;
+        // End cap
+        d += `<path d="M ${b1ax},${b1ay} L ${b1bx},${b1by} L ${t1bx},${t1by} L ${t1ax},${t1ay} Z" fill="#c8c8cc" stroke="#aaaaae" stroke-width="0.4"/>`;
 
         return d;
     }
 
-    // === DIFFUSERS - small white squares on the ceiling ===
+    // Collect ducts and draw with shadows underneath
+    const ductElements = elements.filter(e => e.type === 'duct' && e.points && e.points.length >= 2);
+
+    // First pass: subtle shadow under ducts (on floor)
+    ductElements.forEach(el => {
+        const pts = el.points.map(p => toLocal(p));
+        for (let i = 0; i < pts.length - 1; i++) {
+            const dx = pts[i+1].x - pts[i].x;
+            const dy = pts[i+1].y - pts[i].y;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len < 1) continue;
+            const nx = -dy / len * 7;
+            const ny = dx / len * 7;
+
+            const sa = projSVG(pts[i].x + nx, pts[i].y + ny, 0);
+            const sb = projSVG(pts[i].x - nx, pts[i].y - ny, 0);
+            const sc = projSVG(pts[i+1].x - nx, pts[i+1].y - ny, 0);
+            const sd = projSVG(pts[i+1].x + nx, pts[i+1].y + ny, 0);
+
+            svg += `<path d="M ${sa[0]},${sa[1]} L ${sb[0]},${sb[1]} L ${sc[0]},${sc[1]} L ${sd[0]},${sd[1]} Z" fill="#000" opacity="0.12"/>`;
+        }
+    });
+
+    // Second pass: actual ducts
+    ductElements.forEach(el => {
+        const pts = el.points.map(p => toLocal(p));
+        for (let i = 0; i < pts.length - 1; i++) {
+            svg += drawDuctSegment(pts[i], pts[i + 1], WALL_HEIGHT - 6);
+        }
+    });
+
+    // === DIFFUSERS - clean white ceiling registers ===
     elements.forEach(el => {
         if (el.type === 'diffuser') {
             const p = toLocal({ x: el.x, y: el.y });
-            const size = 8;
-            const z = WALL_HEIGHT - 2;
+            const size = 7;
+            const z = WALL_HEIGHT - 1;
             const corners = [
                 { x: p.x - size, y: p.y - size },
                 { x: p.x + size, y: p.y - size },
@@ -861,70 +926,72 @@ function generateSVG() {
             ];
             const proj4 = corners.map(c => projSVG(c.x, c.y, z));
             const path = `M ${proj4[0][0]},${proj4[0][1]} L ${proj4[1][0]},${proj4[1][1]} L ${proj4[2][0]},${proj4[2][1]} L ${proj4[3][0]},${proj4[3][1]} Z`;
-            svg += `<path d="${path}" fill="#ffffff" stroke="#666666" stroke-width="0.8"/>`;
+            svg += `<path d="${path}" fill="#ffffff" stroke="#888" stroke-width="0.5"/>`;
+            // Inner detail
+            const innerSize = 4;
+            const innerCorners = [
+                { x: p.x - innerSize, y: p.y - innerSize },
+                { x: p.x + innerSize, y: p.y - innerSize },
+                { x: p.x + innerSize, y: p.y + innerSize },
+                { x: p.x - innerSize, y: p.y + innerSize }
+            ];
+            const proj4i = innerCorners.map(c => projSVG(c.x, c.y, z + 0.1));
+            const innerPath = `M ${proj4i[0][0]},${proj4i[0][1]} L ${proj4i[1][0]},${proj4i[1][1]} L ${proj4i[2][0]},${proj4i[2][1]} L ${proj4i[3][0]},${proj4i[3][1]} Z`;
+            svg += `<path d="${innerPath}" fill="none" stroke="#aaa" stroke-width="0.4"/>`;
         }
     });
 
-    // Helper: draw isometric cube
-    function drawIsoCube(centerX, centerY, halfSize, height, baseZ, topColor, leftColor, rightColor, strokeColor) {
+    // === Helper: draw isometric cube with gradients ===
+    function drawIsoCube(centerX, centerY, halfSize, height, baseZ, topGrad, frontGrad, rightGrad, stroke) {
         const hs = halfSize;
-        // Bottom corners
         const c = [
             { x: centerX - hs, y: centerY - hs },
             { x: centerX + hs, y: centerY - hs },
             { x: centerX + hs, y: centerY + hs },
             { x: centerX - hs, y: centerY + hs }
         ];
-        // Project bottom and top corners
         const b = c.map(p => projSVG(p.x, p.y, baseZ));
         const t = c.map(p => projSVG(p.x, p.y, baseZ + height));
 
         let cube = '';
 
-        // In iso projection (30 degrees), visible faces are:
-        // - Top (always visible from above)
-        // - Front-right face (corner 1->2, going right-down)
-        // - Front-left face (corner 2->3, going left-down)
-        // Actually since we use (x-y) and (x+y) projection:
-        // - Top face is visible
-        // - The face on the +y side (front) is visible
-        // - The face on the +x side (right) is visible
+        // Shadow on floor under cube
+        const shadow = c.map(p => projSVG(p.x + 4, p.y + 4, 0.5));
+        cube += `<path d="M ${shadow[0][0]},${shadow[0][1]} L ${shadow[1][0]},${shadow[1][1]} L ${shadow[2][0]},${shadow[2][1]} L ${shadow[3][0]},${shadow[3][1]} Z" fill="#000" opacity="0.2"/>`;
 
         // Top face
-        cube += `<path d="M ${t[0][0]},${t[0][1]} L ${t[1][0]},${t[1][1]} L ${t[2][0]},${t[2][1]} L ${t[3][0]},${t[3][1]} Z" fill="${topColor}" stroke="${strokeColor}" stroke-width="0.8" stroke-linejoin="round"/>`;
+        cube += `<path d="M ${t[0][0]},${t[0][1]} L ${t[1][0]},${t[1][1]} L ${t[2][0]},${t[2][1]} L ${t[3][0]},${t[3][1]} Z" fill="${topGrad}" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
 
-        // Front face (corners 2-3, bottom -> top)
-        cube += `<path d="M ${b[3][0]},${b[3][1]} L ${b[2][0]},${b[2][1]} L ${t[2][0]},${t[2][1]} L ${t[3][0]},${t[3][1]} Z" fill="${leftColor}" stroke="${strokeColor}" stroke-width="0.8" stroke-linejoin="round"/>`;
+        // Front face (corners 3-2, bottom -> top)
+        cube += `<path d="M ${b[3][0]},${b[3][1]} L ${b[2][0]},${b[2][1]} L ${t[2][0]},${t[2][1]} L ${t[3][0]},${t[3][1]} Z" fill="${frontGrad}" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
 
         // Right face (corners 1-2, bottom -> top)
-        cube += `<path d="M ${b[1][0]},${b[1][1]} L ${b[2][0]},${b[2][1]} L ${t[2][0]},${t[2][1]} L ${t[1][0]},${t[1][1]} Z" fill="${rightColor}" stroke="${strokeColor}" stroke-width="0.8" stroke-linejoin="round"/>`;
+        cube += `<path d="M ${b[1][0]},${b[1][1]} L ${b[2][0]},${b[2][1]} L ${t[2][0]},${t[2][1]} L ${t[1][0]},${t[1][1]} Z" fill="${rightGrad}" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
+
+        // Top highlight edge (gives beveled look)
+        cube += `<line x1="${t[0][0]}" y1="${t[0][1]}" x2="${t[1][0]}" y2="${t[1][1]}" stroke="#ffffff" stroke-width="0.8" opacity="0.4"/>`;
+        cube += `<line x1="${t[0][0]}" y1="${t[0][1]}" x2="${t[3][0]}" y2="${t[3][1]}" stroke="#ffffff" stroke-width="0.8" opacity="0.4"/>`;
 
         return cube;
     }
 
-    // === VAVs - blue isometric cubes ===
+    // === VAVs - blue beveled cubes ===
     elements.forEach(el => {
         if (el.type === 'vav') {
             const p = toLocal({ x: el.x, y: el.y });
             const baseZ = WALL_HEIGHT - 22;
             svg += drawIsoCube(p.x, p.y, 11, 22, baseZ,
-                '#2563eb',  // top (brightest)
-                '#1e40af',  // front (medium)
-                '#1e3a8a',  // right (darkest)
-                '#0c1c5c'); // stroke
+                'url(#vavTop)', 'url(#vavFront)', 'url(#vavRight)', '#0c1c5c');
         }
     });
 
-    // === AHU - green box (larger) ===
+    // === AHU - green beveled cube (bigger) ===
     elements.forEach(el => {
         if (el.type === 'ahu') {
             const p = toLocal({ x: el.x, y: el.y });
-            const baseZ = WALL_HEIGHT - 30;
-            svg += drawIsoCube(p.x, p.y, 22, 30, baseZ,
-                '#22c55e',
-                '#16a34a',
-                '#15803d',
-                '#0a4220');
+            const baseZ = WALL_HEIGHT - 28;
+            svg += drawIsoCube(p.x, p.y, 20, 28, baseZ,
+                'url(#ahuTop)', 'url(#ahuFront)', 'url(#ahuRight)', '#0a4220');
         }
     });
 
@@ -950,12 +1017,11 @@ function downloadPNG() {
     const url = URL.createObjectURL(svgBlob);
     const img = new Image();
     img.onload = function() {
-        // Make PNG 2x size for higher quality
         const canvas = document.createElement('canvas');
         canvas.width = img.width * 2;
         canvas.height = img.height * 2;
         const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#000000';
+        ctx.fillStyle = '#0a0a0d';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         canvas.toBlob(function(blob) {
