@@ -17,6 +17,7 @@ UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
 UPLOAD_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_upload.png")
 UPLOAD_PDF_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_upload.pdf")
+CLEAN_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_clean.png")
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -35,6 +36,286 @@ def pdf_to_png(pdf_path, out_path):
     doc.close()
 
 
+# ============================================================
+# ARCHITECTURE DETECTION ENGINE
+# ============================================================
+
+def remove_text_from_plan(img_gray):
+    """Remove text and small annotations using connected components filter."""
+    # Threshold
+    _, binary = cv2.threshold(img_gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+    # Find connected components
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+    # Create mask keeping only large/elongated components (walls, not text)
+    cleaned = np.zeros_like(binary)
+    for i in range(1, num_labels):
+        x, y, w, h, area = stats[i]
+        aspect = max(w, h) / max(min(w, h), 1)
+
+        # Keep if: very long (likely wall) OR very large area (likely wall)
+        if (aspect > 4 and area > 80) or (area > 500 and max(w, h) > 40):
+            cleaned[labels == i] = 255
+
+    return cleaned
+
+
+def detect_walls_hough(binary_clean, min_line_length=50, max_line_gap=15):
+    """Detect straight wall lines using Hough Transform."""
+    # Apply morphology to connect broken lines
+    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
+    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
+
+    horizontal = cv2.morphologyEx(binary_clean, cv2.MORPH_OPEN, kernel_h, iterations=1)
+    vertical = cv2.morphologyEx(binary_clean, cv2.MORPH_OPEN, kernel_v, iterations=1)
+
+    combined = cv2.bitwise_or(horizontal, vertical)
+
+    # Hough Lines Probabilistic
+    lines = cv2.HoughLinesP(
+        combined,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=80,
+        minLineLength=min_line_length,
+        maxLineGap=max_line_gap
+    )
+
+    return lines if lines is not None else []
+
+
+def snap_to_orthogonal(lines, angle_tolerance=5):
+    """Snap lines to perfectly horizontal or vertical (0 or 90 degrees)."""
+    snapped = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        dx = x2 - x1
+        dy = y2 - y1
+        angle = math.degrees(math.atan2(dy, dx))
+
+        # Normalize angle to 0-180
+        if angle < 0:
+            angle += 180
+
+        # Snap to 0 (horizontal) or 90 (vertical)
+        if angle < angle_tolerance or angle > 180 - angle_tolerance:
+            # Horizontal
+            y_avg = (y1 + y2) // 2
+            snapped.append([min(x1, x2), y_avg, max(x1, x2), y_avg])
+        elif abs(angle - 90) < angle_tolerance:
+            # Vertical
+            x_avg = (x1 + x2) // 2
+            snapped.append([x_avg, min(y1, y2), x_avg, max(y1, y2)])
+        # Skip diagonal lines (rare in floor plans)
+
+    return snapped
+
+
+def merge_collinear_lines(lines, distance_threshold=10):
+    """Merge lines that are collinear and close to each other."""
+    if not lines:
+        return []
+
+    horizontal = [l for l in lines if l[1] == l[3]]  # y1 == y2
+    vertical = [l for l in lines if l[0] == l[2]]    # x1 == x2
+
+    merged = []
+
+    # Group horizontal lines by similar Y coordinate
+    horizontal.sort(key=lambda l: (l[1], l[0]))
+    h_groups = []
+    for line in horizontal:
+        added = False
+        for group in h_groups:
+            if abs(line[1] - group[0][1]) < distance_threshold:
+                group.append(line)
+                added = True
+                break
+        if not added:
+            h_groups.append([line])
+
+    # Merge each group
+    for group in h_groups:
+        y_avg = sum(l[1] for l in group) // len(group)
+        # Find continuous segments
+        group.sort(key=lambda l: l[0])
+        x_min = min(l[0] for l in group)
+        x_max = max(l[2] for l in group)
+        merged.append([x_min, y_avg, x_max, y_avg])
+
+    # Group vertical lines by similar X coordinate
+    vertical.sort(key=lambda l: (l[0], l[1]))
+    v_groups = []
+    for line in vertical:
+        added = False
+        for group in v_groups:
+            if abs(line[0] - group[0][0]) < distance_threshold:
+                group.append(line)
+                added = True
+                break
+        if not added:
+            v_groups.append([line])
+
+    for group in v_groups:
+        x_avg = sum(l[0] for l in group) // len(group)
+        group.sort(key=lambda l: l[1])
+        y_min = min(l[1] for l in group)
+        y_max = max(l[3] for l in group)
+        merged.append([x_avg, y_min, x_avg, y_max])
+
+    return merged
+
+
+def classify_exterior_vs_interior(lines, img_shape):
+    """Identify which lines form the exterior perimeter vs interior walls."""
+    h, w = img_shape[:2]
+
+    if not lines:
+        return [], []
+
+    # Find the bounding box of all lines (potential building perimeter)
+    all_x = [l[0] for l in lines] + [l[2] for l in lines]
+    all_y = [l[1] for l in lines] + [l[3] for l in lines]
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+
+    # Lines close to the bounding box are likely exterior
+    edge_tolerance = 50
+    exterior_lines = []
+    interior_lines = []
+
+    for line in lines:
+        x1, y1, x2, y2 = line
+        # Check if line is near any edge of bounding box
+        near_edge = (
+            min(y1, y2) < min_y + edge_tolerance or  # near top
+            max(y1, y2) > max_y - edge_tolerance or  # near bottom
+            min(x1, x2) < min_x + edge_tolerance or  # near left
+            max(x1, x2) > max_x - edge_tolerance     # near right
+        )
+        # Long lines are more likely exterior
+        length = math.hypot(x2 - x1, y2 - y1)
+
+        if near_edge and length > 100:
+            exterior_lines.append(line)
+        else:
+            interior_lines.append(line)
+
+    return exterior_lines, interior_lines
+
+
+def build_exterior_polygon(exterior_lines):
+    """Construct a closed polygon from exterior lines."""
+    if not exterior_lines:
+        return None
+
+    # Get bounding box and use as fallback simple rectangle
+    all_x = [l[0] for l in exterior_lines] + [l[2] for l in exterior_lines]
+    all_y = [l[1] for l in exterior_lines] + [l[3] for l in exterior_lines]
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+
+    # Simple rectangle perimeter (we can improve later)
+    return [
+        {"x": int(min_x), "y": int(min_y)},
+        {"x": int(max_x), "y": int(min_y)},
+        {"x": int(max_x), "y": int(max_y)},
+        {"x": int(min_x), "y": int(max_y)}
+    ]
+
+
+def detect_doors(interior_lines, all_lines, gap_min=20, gap_max=60):
+    """Detect doors as gaps in walls."""
+    doors = []
+    # For each interior wall, check if it has small gaps that could be doors
+    # This is a simplified version - real doors are complex
+    return doors
+
+
+def detect_architecture(image_path, crop_box=None):
+    """Main detection pipeline."""
+    img = cv2.imread(image_path)
+    if img is None:
+        return None
+
+    if crop_box:
+        x, y, w, h = crop_box
+        img = img[y:y+h, x:x+w]
+
+    img_h, img_w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Step 1: Remove text and small components
+    binary_clean = remove_text_from_plan(gray)
+
+    # Save preview of cleaned image
+    cv2.imwrite(CLEAN_IMAGE_PATH, binary_clean)
+
+    # Step 2: Detect lines with Hough
+    raw_lines = detect_walls_hough(binary_clean)
+
+    if len(raw_lines) == 0:
+        return {
+            "image_width": img_w,
+            "image_height": img_h,
+            "elements": [],
+            "stats": {"lines_raw": 0, "lines_merged": 0, "exterior": 0, "interior": 0}
+        }
+
+    # Step 3: Snap to orthogonal
+    snapped = snap_to_orthogonal([[l] for l in raw_lines] if hasattr(raw_lines[0], '__len__') else raw_lines)
+    # Hough returns array shape (N, 1, 4) - flatten
+    snapped = snap_to_orthogonal(raw_lines)
+
+    # Step 4: Merge collinear lines
+    merged = merge_collinear_lines(snapped, distance_threshold=15)
+
+    # Step 5: Filter very short lines
+    merged = [l for l in merged if math.hypot(l[2] - l[0], l[3] - l[1]) > 40]
+
+    # Step 6: Classify exterior vs interior
+    exterior_lines, interior_lines = classify_exterior_vs_interior(merged, (img_h, img_w))
+
+    # Step 7: Build exterior polygon
+    elements = []
+    ext_polygon = build_exterior_polygon(exterior_lines)
+    if ext_polygon:
+        elements.append({
+            "type": "extwall",
+            "points": ext_polygon,
+            "closed": True,
+            "detected": True
+        })
+
+    # Step 8: Add interior walls as individual segments
+    for line in interior_lines:
+        elements.append({
+            "type": "intwall",
+            "points": [
+                {"x": int(line[0]), "y": int(line[1])},
+                {"x": int(line[2]), "y": int(line[3])}
+            ],
+            "detected": True
+        })
+
+    return {
+        "image_width": img_w,
+        "image_height": img_h,
+        "elements": elements,
+        "stats": {
+            "lines_raw": len(raw_lines),
+            "lines_merged": len(merged),
+            "exterior": len(exterior_lines),
+            "interior": len(interior_lines)
+        }
+    }
+
+
+# ============================================================
+# COLOR DETECTION (existing, kept)
+# ============================================================
+
 def clean_mask(mask, iterations=2):
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=iterations)
@@ -48,7 +329,7 @@ def get_contours(mask):
 
 
 def auto_detect_colors(image_path):
-    """Detect VAVs (blue), AHU (green), Ducts (red), Ext walls (purple), Int walls (orange) by color."""
+    """Detect VAVs, AHU, Ducts by color marking."""
     img = cv2.imread(image_path)
     if img is None:
         return None
@@ -58,7 +339,7 @@ def auto_detect_colors(image_path):
 
     elements = []
 
-    # === BLUE VAVs ===
+    # BLUE VAVs
     blue_mask = cv2.inRange(hsv, np.array([90, 60, 60]), np.array([140, 255, 255]))
     blue_mask = clean_mask(blue_mask, 1)
     for cnt in get_contours(blue_mask):
@@ -66,160 +347,129 @@ def auto_detect_colors(image_path):
         if area < 40 or area > 5000:
             continue
         x, y, ww, hh = cv2.boundingRect(cnt)
-        cx = int(x + ww / 2)
-        cy = int(y + hh / 2)
-        elements.append({"type": "vav", "x": cx, "y": cy})
+        elements.append({"type": "vav", "x": int(x + ww / 2), "y": int(y + hh / 2)})
 
-    # === GREEN AHU ===
+    # GREEN AHU
     green_mask = cv2.inRange(hsv, np.array([40, 60, 60]), np.array([85, 255, 255]))
     green_mask = clean_mask(green_mask, 1)
-    ahu_candidates = []
+    candidates = []
     for cnt in get_contours(green_mask):
         area = cv2.contourArea(cnt)
         if area < 200:
             continue
         x, y, ww, hh = cv2.boundingRect(cnt)
-        cx = int(x + ww / 2)
-        cy = int(y + hh / 2)
-        ahu_candidates.append({"area": area, "x": cx, "y": cy})
-    ahu_candidates.sort(key=lambda a: -a["area"])
-    for a in ahu_candidates[:1]:
+        candidates.append({"area": area, "x": int(x + ww / 2), "y": int(y + hh / 2)})
+    candidates.sort(key=lambda a: -a["area"])
+    for a in candidates[:1]:
         elements.append({"type": "ahu", "x": a["x"], "y": a["y"]})
 
-    # === RED DUCTS ===
+    # RED DUCTS
     red1 = cv2.inRange(hsv, np.array([0, 60, 60]), np.array([10, 255, 255]))
     red2 = cv2.inRange(hsv, np.array([170, 60, 60]), np.array([180, 255, 255]))
     red_mask = clean_mask(cv2.bitwise_or(red1, red2), 1)
-
-    # Extract red lines as polylines using contour approximation
     for cnt in get_contours(red_mask):
         area = cv2.contourArea(cnt)
         if area < 80:
             continue
-        epsilon = 0.01 * cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, epsilon, False)
-        pts = [[int(p[0][0]), int(p[0][1])] for p in approx]
-        if len(pts) >= 2:
-            # Simplify to 2 endpoints per duct segment
-            x, y, ww, hh = cv2.boundingRect(cnt)
-            if ww > hh:
-                # Horizontal duct
-                elements.append({
-                    "type": "duct",
-                    "points": [{"x": x, "y": int(y + hh / 2)}, {"x": x + ww, "y": int(y + hh / 2)}]
-                })
-            else:
-                # Vertical duct
-                elements.append({
-                    "type": "duct",
-                    "points": [{"x": int(x + ww / 2), "y": y}, {"x": int(x + ww / 2), "y": y + hh}]
-                })
+        x, y, ww, hh = cv2.boundingRect(cnt)
+        if ww > hh:
+            elements.append({
+                "type": "duct",
+                "points": [{"x": x, "y": int(y + hh / 2)}, {"x": x + ww, "y": int(y + hh / 2)}]
+            })
+        else:
+            elements.append({
+                "type": "duct",
+                "points": [{"x": int(x + ww / 2), "y": y}, {"x": int(x + ww / 2), "y": y + hh}]
+            })
 
-    # === PURPLE EXTERIOR WALLS ===
-    purple_mask = cv2.inRange(hsv, np.array([140, 60, 60]), np.array([170, 255, 255]))
-    purple_mask = clean_mask(purple_mask, 2)
-    for cnt in get_contours(purple_mask):
-        area = cv2.contourArea(cnt)
-        if area < 200:
-            continue
-        epsilon = 0.008 * cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
-        pts = [{"x": int(p[0][0]), "y": int(p[0][1])} for p in approx]
-        if len(pts) >= 3:
-            elements.append({"type": "extwall", "points": pts, "closed": True})
+    return {"image_width": w, "image_height": h, "elements": elements}
 
-    # === ORANGE INTERIOR WALLS ===
-    orange_mask = cv2.inRange(hsv, np.array([10, 100, 100]), np.array([25, 255, 255]))
-    orange_mask = clean_mask(orange_mask, 2)
-    for cnt in get_contours(orange_mask):
-        area = cv2.contourArea(cnt)
-        if area < 100:
-            continue
-        epsilon = 0.01 * cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, epsilon, False)
-        pts = [{"x": int(p[0][0]), "y": int(p[0][1])} for p in approx]
-        if len(pts) >= 2:
-            elements.append({"type": "intwall", "points": pts})
 
-    return {
-        "image_width": w,
-        "image_height": h,
-        "elements": elements
-    }
-
+# ============================================================
+# HTML PAGES
+# ============================================================
 
 LOGIN_PAGE = '''<!DOCTYPE html>
-<html>
-<head>
-<title>BAS Generator Login</title>
+<html><head><title>Login</title>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { background:#0d0f14; color:white; font-family:'Segoe UI', Arial, sans-serif; min-height:100vh; display:flex; align-items:center; justify-content:center; }
-.card { background:#181b24; border:1px solid #2a3050; border-radius:24px; padding:45px; width:420px; text-align:center; box-shadow:0 0 60px rgba(0,0,0,0.65); }
-.logo { font-size:48px; margin-bottom:12px; }
-h1 { font-size:26px; margin-bottom:6px; background:linear-gradient(135deg,#2d89ef,#b388ff); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
-.sub { color:#8b93ad; font-size:14px; margin-bottom:24px; }
-input { width:100%; padding:15px; border-radius:12px; border:1px solid #2a3050; background:#10131a; color:white; font-size:16px; outline:none; }
-input:focus { border-color:#2d89ef; }
-button { width:100%; padding:15px; border:none; border-radius:12px; margin-top:18px; background:linear-gradient(135deg,#1a6fd4,#2d89ef); color:white; font-size:16px; font-weight:700; cursor:pointer; }
-.error { margin-top:14px; color:#ff6b6b; font-size:13px; }
-.footer { color:#3a4060; font-size:11px; margin-top:24px; }
-</style>
-</head>
-<body>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;}
+.card{background:#181b24;border:1px solid #2a3050;border-radius:24px;padding:45px;width:420px;text-align:center;box-shadow:0 0 60px rgba(0,0,0,0.65);}
+.logo{font-size:48px;margin-bottom:12px;}
+h1{font-size:26px;margin-bottom:6px;background:linear-gradient(135deg,#2d89ef,#b388ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.sub{color:#8b93ad;font-size:14px;margin-bottom:24px;}
+input{width:100%;padding:15px;border-radius:12px;border:1px solid #2a3050;background:#10131a;color:white;font-size:16px;outline:none;}
+input:focus{border-color:#2d89ef;}
+button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;background:linear-gradient(135deg,#1a6fd4,#2d89ef);color:white;font-size:16px;font-weight:700;cursor:pointer;}
+.error{margin-top:14px;color:#ff6b6b;font-size:13px;}
+.footer{color:#3a4060;font-size:11px;margin-top:24px;}
+</style></head><body>
 <div class="card">
 <div class="logo">&#128274;</div>
-<h1>BAS Generator v22</h1>
+<h1>BAS Generator v23</h1>
 <p class="sub">Private Access</p>
 <form method="POST" action="/login">
 <input type="password" name="password" placeholder="Enter password" required autofocus>
 <button type="submit">Login</button>
 </form>
-{% if error %}
-<div class="error">Invalid password. Try again.</div>
-{% endif %}
-<div class="footer">Made by Paolo Vasquez</div>
-</div>
-</body>
-</html>'''
+{% if error %}<div class="error">Invalid password. Try again.</div>{% endif %}
+<div class="footer">Made by Paolo V. R.</div>
+</div></body></html>'''
 
 
 HOME_PAGE = '''<!DOCTYPE html>
-<html>
-<head>
-<title>BAS Generator v22 - MEGA</title>
+<html><head><title>BAS Generator v23</title>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
-.card { background: #181b24; border: 1px solid #2a2f3e; border-radius: 24px; padding: 40px; text-align: center; max-width: 760px; width: 100%; box-shadow: 0 0 60px rgba(0,0,0,0.6); }
-.logo { font-size: 56px; margin-bottom: 16px; }
-h1 { font-size: 30px; margin-bottom: 8px; background: linear-gradient(135deg, #2d89ef, #b388ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-.sub { color: #7a8099; font-size: 13px; margin-bottom: 20px; }
-.zone { border: 2px dashed #2d3348; border-radius: 16px; padding: 28px; margin-bottom: 18px; background: #13151d; }
-.zone:hover { border-color: #2d89ef; }
-input[type=file] { background: transparent; color: #aab0c4; border: none; font-size: 13px; width: 100%; cursor: pointer; }
-.lbl { display: block; font-size: 12px; color: #5a6280; margin-top: 8px; }
-.option-row { display: flex; gap: 12px; margin-bottom: 18px; }
-.option-btn { flex: 1; padding: 16px; background: #13151d; border: 2px solid #2a3050; border-radius: 12px; color: white; font-size: 13px; font-weight: 700; cursor: pointer; transition: all 0.2s; }
-.option-btn:hover { border-color: #2d89ef; }
-.option-btn.active { background: linear-gradient(135deg, #1a6fd4, #2d89ef); border-color: #2d89ef; }
-.btn { background: linear-gradient(135deg, #1a6fd4, #2d89ef); color: white; border: none; border-radius: 14px; padding: 16px 40px; font-size: 16px; font-weight: 700; cursor: pointer; width: 100%; }
-.feature-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 18px; }
-.feature { background: #13151d; border: 1px solid #2a3050; border-radius: 10px; padding: 10px; text-align: left; font-size: 11px; color: #aab0c4; display: flex; gap: 8px; align-items: center; }
-.color-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
-.footer { color: #3a4060; font-size: 11px; margin-top: 20px; }
-.badge { display: inline-block; background: linear-gradient(135deg, #ff9800, #ff5722); color: white; padding: 3px 10px; font-size: 10px; border-radius: 6px; margin-left: 6px; }
-.tip { background: #1a1d28; border-left: 3px solid #2d89ef; padding: 10px 14px; margin-bottom: 16px; font-size: 11px; color: #aab0c4; text-align: left; border-radius: 6px; }
-</style>
-</head>
-<body>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
+.card{background:#181b24;border:1px solid #2a2f3e;border-radius:24px;padding:36px;text-align:center;max-width:780px;width:100%;box-shadow:0 0 60px rgba(0,0,0,0.6);}
+.logo{font-size:48px;margin-bottom:12px;}
+h1{font-size:28px;margin-bottom:6px;background:linear-gradient(135deg,#2d89ef,#b388ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.sub{color:#7a8099;font-size:13px;margin-bottom:18px;}
+.zone{border:2px dashed #2d3348;border-radius:14px;padding:24px;margin-bottom:14px;background:#13151d;}
+.zone:hover{border-color:#2d89ef;}
+input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px;width:100%;cursor:pointer;}
+.lbl{display:block;font-size:11px;color:#5a6280;margin-top:6px;}
+.option-row{display:flex;gap:10px;margin-bottom:14px;}
+.option-btn{flex:1;padding:14px 10px;background:#13151d;border:2px solid #2a3050;border-radius:10px;color:white;font-size:12px;font-weight:700;cursor:pointer;transition:all 0.2s;line-height:1.3;}
+.option-btn small{display:block;font-weight:400;font-size:10px;color:#8a92a8;margin-top:4px;}
+.option-btn:hover{border-color:#2d89ef;}
+.option-btn.active{background:linear-gradient(135deg,#1a6fd4,#2d89ef);border-color:#2d89ef;}
+.option-btn.active small{color:#bcdaff;}
+.btn{background:linear-gradient(135deg,#1a6fd4,#2d89ef);color:white;border:none;border-radius:12px;padding:15px 40px;font-size:15px;font-weight:700;cursor:pointer;width:100%;}
+.feature-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:14px;}
+.feature{background:#13151d;border:1px solid #2a3050;border-radius:8px;padding:8px;text-align:left;font-size:10px;color:#aab0c4;display:flex;gap:6px;align-items:center;}
+.color-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
+.footer{color:#3a4060;font-size:10px;margin-top:14px;}
+.badge{display:inline-block;background:linear-gradient(135deg,#ff9800,#ff5722);color:white;padding:2px 9px;font-size:10px;border-radius:6px;margin-left:6px;}
+.tip{background:#1a1d28;border-left:3px solid #2d89ef;padding:8px 12px;margin-bottom:12px;font-size:11px;color:#aab0c4;text-align:left;border-radius:5px;}
+</style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v22 <span class="badge">MEGA</span></h1>
-<p class="sub">Auto-detect + CAD editor + Synchrony render</p>
+<h1>BAS Generator v23 <span class="badge">AUTO ARCH</span></h1>
+<p class="sub">Auto-detect building architecture + HVAC</p>
 
 <div class="tip">
-<b>NEW:</b> If you pre-mark your plan in Paint with colors below, the app auto-detects all elements!
+<b>NEW:</b> Auto-Detect Architecture extracts walls & rooms from your plan automatically!
+</div>
+
+<form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
+<input type="hidden" name="mode" id="modeInput" value="manual">
+
+<div class="option-row">
+<button type="button" class="option-btn active" id="manualBtn" onclick="setMode('manual')">
+Manual Editor
+<small>Draw everything yourself</small>
+</button>
+<button type="button" class="option-btn" id="archBtn" onclick="setMode('arch')">
+Auto-Detect Architecture
+<small>Detects walls + rooms (NEW)</small>
+</button>
+<button type="button" class="option-btn" id="colorBtn" onclick="setMode('color')">
+Auto-Detect Colors
+<small>Detects HVAC if pre-marked</small>
+</button>
 </div>
 
 <div class="feature-row">
@@ -227,16 +477,6 @@ input[type=file] { background: transparent; color: #aab0c4; border: none; font-s
 <div class="feature"><div class="color-dot" style="background:#16a34a"></div> Green = AHU</div>
 <div class="feature"><div class="color-dot" style="background:#dc2626"></div> Red = Ducts</div>
 <div class="feature"><div class="color-dot" style="background:#9333ea"></div> Purple = Ext walls</div>
-<div class="feature"><div class="color-dot" style="background:#ea580c"></div> Orange = Int walls</div>
-<div class="feature"><div class="color-dot" style="background:#fff;border:1px solid #888"></div> White diffusers (manual)</div>
-</div>
-
-<form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
-<input type="hidden" name="auto_detect" id="autoDetectInput" value="false">
-
-<div class="option-row">
-<button type="button" class="option-btn active" id="manualBtn" onclick="setMode('manual')">Manual Editor</button>
-<button type="button" class="option-btn" id="autoBtn" onclick="setMode('auto')">Auto-Detect Colors</button>
 </div>
 
 <div class="zone">
@@ -250,58 +490,55 @@ input[type=file] { background: transparent; color: #aab0c4; border: none; font-s
 </div>
 
 <script>
-function setMode(mode) {
-    document.getElementById('manualBtn').classList.toggle('active', mode === 'manual');
-    document.getElementById('autoBtn').classList.toggle('active', mode === 'auto');
-    document.getElementById('autoDetectInput').value = (mode === 'auto') ? 'true' : 'false';
+function setMode(mode){
+    document.getElementById('manualBtn').classList.toggle('active', mode==='manual');
+    document.getElementById('archBtn').classList.toggle('active', mode==='arch');
+    document.getElementById('colorBtn').classList.toggle('active', mode==='color');
+    document.getElementById('modeInput').value = mode;
 }
 </script>
-</body>
-</html>'''
+</body></html>'''
 
 
 EDITOR_PAGE = '''<!DOCTYPE html>
-<html>
-<head>
-<title>CAD Editor v22</title>
+<html><head><title>CAD Editor v23</title>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; padding: 8px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-.topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-h1 { font-size: 16px; background: linear-gradient(135deg, #2d89ef, #b388ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-.toolbar { background: #181b24; border: 1px solid #252a38; border-radius: 10px; padding: 8px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
-.tool-btn { padding: 8px 12px; border: 2px solid transparent; background: #1e2233; color: white; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
-.tool-btn:hover { background: #252a38; }
-.tool-btn.active { border-color: #fff; background: #2d3348; }
-.color-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.3); }
-.divider { width: 1px; background: #333; height: 24px; margin: 0 3px; }
-.canvas-wrap { flex: 1; position: relative; background: #1a1a1a; border-radius: 10px; border: 1px solid #2a3050; overflow: hidden; }
-#canvasContainer { width: 100%; height: 100%; position: relative; overflow: auto; }
-canvas { display: block; }
-.action-btn { padding: 8px 16px; border: none; border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; }
-.btn-green { background: #16a34a; color: white; }
-.btn-red { background: #dc2626; color: white; }
-.btn-gray { background: #333; color: white; }
-.btn-purple { background: #9333ea; color: white; }
-.spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.loading-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none; align-items: center; justify-content: center; z-index: 100; flex-direction: column; gap: 16px; }
-.loading-overlay.active { display: flex; }
-.status { padding: 4px 12px; background: #1e2233; border-radius: 6px; font-size: 11px; color: #aab0c4; min-width: 200px; text-align: center; }
-.auto-banner { background: linear-gradient(135deg, #16a34a22, #16a34a44); border: 1px solid #16a34a; border-radius: 8px; padding: 8px 14px; font-size: 12px; color: #4ade80; margin-bottom: 8px; }
-.cursor-cross { cursor: crosshair; }
-.cursor-move { cursor: move; }
-</style>
-</head>
-<body>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:8px;height:100vh;display:flex;flex-direction:column;overflow:hidden;}
+.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+h1{font-size:16px;background:linear-gradient(135deg,#2d89ef,#b388ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.toolbar{background:#181b24;border:1px solid #252a38;border-radius:10px;padding:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px;}
+.tool-btn{padding:8px 12px;border:2px solid transparent;background:#1e2233;color:white;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;white-space:nowrap;}
+.tool-btn:hover{background:#252a38;}
+.tool-btn.active{border-color:#fff;background:#2d3348;}
+.color-swatch{width:14px;height:14px;border-radius:3px;border:1px solid rgba(255,255,255,0.3);}
+.divider{width:1px;background:#333;height:24px;margin:0 3px;}
+.canvas-wrap{flex:1;position:relative;background:#1a1a1a;border-radius:10px;border:1px solid #2a3050;overflow:hidden;}
+#canvasContainer{width:100%;height:100%;position:relative;overflow:auto;}
+canvas{display:block;}
+.action-btn{padding:8px 16px;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;}
+.btn-green{background:#16a34a;color:white;}
+.btn-red{background:#dc2626;color:white;}
+.btn-gray{background:#333;color:white;}
+.btn-purple{background:#9333ea;color:white;}
+.btn-orange{background:#ea580c;color:white;}
+.spinner{display:inline-block;width:20px;height:20px;border:3px solid #fff;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.loading-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.85);display:none;align-items:center;justify-content:center;z-index:100;flex-direction:column;gap:16px;}
+.loading-overlay.active{display:flex;}
+.status{padding:4px 12px;background:#1e2233;border-radius:6px;font-size:11px;color:#aab0c4;min-width:200px;text-align:center;}
+.auto-banner{background:linear-gradient(135deg,#16a34a22,#16a34a44);border:1px solid #16a34a;border-radius:8px;padding:8px 14px;font-size:12px;color:#4ade80;margin-bottom:8px;}
+.cursor-cross{cursor:crosshair;}
+.cursor-move{cursor:move;}
+</style></head><body>
 
-{% if auto_detected %}
-<div class="auto-banner">&#10004; Auto-detected from colors: {{ n_detected }} elements. Fine-tune with editor below.</div>
+{% if detected_message %}
+<div class="auto-banner">&#10004; {{ detected_message }}</div>
 {% endif %}
 
 <div class="topbar">
-<h1>CAD Editor v22</h1>
-<div style="display: flex; gap: 6px;">
+<h1>CAD Editor v23 - Auto Architecture</h1>
+<div style="display:flex;gap:6px;">
 <button onclick="undo()" class="action-btn btn-gray">&#8617; Undo</button>
 <button onclick="clearAll()" class="action-btn btn-red">Clear</button>
 <button onclick="autoBranchDiffusers()" class="action-btn btn-purple">Auto-Connect Diffusers</button>
@@ -316,14 +553,8 @@ canvas { display: block; }
 <button class="tool-btn" data-tool="intwall" onclick="selectTool(this)">
 <div class="color-swatch" style="background:#ea580c"></div> Int Wall
 </button>
-
-<div class="divider"></div>
-
 <button class="tool-btn" data-tool="duct" onclick="selectTool(this)">
-<div class="color-swatch" style="background:#fff;border:1px solid #888"></div> Duct Line
-</button>
-<button class="tool-btn" data-tool="duct_elbow" onclick="selectTool(this)">
-&#9696; Duct Elbow
+<div class="color-swatch" style="background:#fff;border:1px solid #888"></div> Duct
 </button>
 
 <div class="divider"></div>
@@ -357,7 +588,7 @@ canvas { display: block; }
 
 <div class="loading-overlay" id="loading">
 <div class="spinner"></div>
-<div style="color:white;font-size:14px;">Building Synchrony-style SVG...</div>
+<div style="color:white;font-size:14px;">Processing...</div>
 </div>
 
 <script>
@@ -373,35 +604,28 @@ let currentTool = 'extwall';
 let elements = initialElements;
 let history = [];
 let currentPolyline = null;
-let elbowFirstPoint = null;
 let hoverPoint = null;
 let selectedElement = null;
 let dragOffset = null;
 
 const COLORS = {
-    extwall: '#9333ea',
-    intwall: '#ea580c',
-    duct: '#dcdce0',
-    duct_elbow: '#dcdce0',
-    vav: '#1e40af',
-    ahu: '#16a34a',
-    diffuser: '#ffffff'
+    extwall:'#9333ea', intwall:'#ea580c', duct:'#dcdce0',
+    vav:'#1e40af', ahu:'#16a34a', diffuser:'#ffffff'
 };
 
 const STATUS_TEXTS = {
-    extwall: 'Click corners of building PERIMETER. Double-click to close polygon.',
-    intwall: 'Click corners of an INTERIOR WALL. Double-click to finish.',
-    duct: 'Click TWO points for a straight duct line.',
-    duct_elbow: 'Click 1: corner point. Click 2: first end. Click 3: second end. Makes L-shape.',
-    vav: 'Click to place a VAV.',
-    ahu: 'Click to place the AHU.',
-    diffuser: 'Click to place a diffuser. Use Auto-Connect to link to ducts.',
-    move: 'Click and drag any element to move it.',
-    delete: 'Click any element to delete it.'
+    extwall:'Click corners of building PERIMETER. Double-click to close.',
+    intwall:'Click corners of an INTERIOR WALL. Double-click to finish.',
+    duct:'Click TWO points for a straight duct line.',
+    vav:'Click to place a VAV.',
+    ahu:'Click to place the AHU.',
+    diffuser:'Click to place a diffuser.',
+    move:'Click and drag any element to move it.',
+    delete:'Click any element to delete it.'
 };
 
 const img = new Image();
-img.onload = function() {
+img.onload = function(){
     bgCanvas.width = img.width;
     bgCanvas.height = img.height;
     drawCanvas.width = img.width;
@@ -412,70 +636,51 @@ img.onload = function() {
 };
 img.src = 'data:image/png;base64,' + imgB64;
 
-function selectTool(btn) {
+function selectTool(btn){
     document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentTool = btn.dataset.tool;
     document.getElementById('statusBar').textContent = STATUS_TEXTS[currentTool] || '';
-
-    if (currentPolyline) {
-        if (currentPolyline.points.length >= 2) elements.push(currentPolyline);
+    if(currentPolyline){
+        if(currentPolyline.points.length >= 2) elements.push(currentPolyline);
         currentPolyline = null;
         saveState();
     }
-    elbowFirstPoint = null;
-
     drawCanvas.className = '';
-    if (currentTool === 'move') drawCanvas.classList.add('cursor-move');
+    if(currentTool === 'move') drawCanvas.classList.add('cursor-move');
     else drawCanvas.classList.add('cursor-cross');
-
     redraw();
 }
 
-function getMousePos(e) {
+function getMousePos(e){
     const rect = drawCanvas.getBoundingClientRect();
-    const scaleX = drawCanvas.width / rect.width;
-    const scaleY = drawCanvas.height / rect.height;
-    return {
-        x: (e.clientX - rect.left) * scaleX,
-        y: (e.clientY - rect.top) * scaleY
-    };
+    const sx = drawCanvas.width / rect.width;
+    const sy = drawCanvas.height / rect.height;
+    return { x: (e.clientX - rect.left) * sx, y: (e.clientY - rect.top) * sy };
 }
 
-drawCanvas.addEventListener('click', function(e) {
+drawCanvas.addEventListener('click', function(e){
     const pos = getMousePos(e);
-
-    if (currentTool === 'delete') {
+    if(currentTool === 'delete'){
         const idx = findElementAt(pos);
-        if (idx !== -1) {
-            elements.splice(idx, 1);
-            saveState();
-            redraw();
-        }
+        if(idx !== -1){ elements.splice(idx, 1); saveState(); redraw(); }
         return;
     }
-
-    if (currentTool === 'move') return;
-
-    if (currentTool === 'vav' || currentTool === 'ahu' || currentTool === 'diffuser') {
+    if(currentTool === 'move') return;
+    if(currentTool === 'vav' || currentTool === 'ahu' || currentTool === 'diffuser'){
         elements.push({ type: currentTool, x: pos.x, y: pos.y });
-        saveState();
-        redraw();
-        return;
+        saveState(); redraw(); return;
     }
-
-    if (currentTool === 'extwall' || currentTool === 'intwall') {
-        if (!currentPolyline) {
+    if(currentTool === 'extwall' || currentTool === 'intwall'){
+        if(!currentPolyline){
             currentPolyline = { type: currentTool, points: [{ x: pos.x, y: pos.y }] };
         } else {
             currentPolyline.points.push({ x: pos.x, y: pos.y });
         }
-        redraw();
-        return;
+        redraw(); return;
     }
-
-    if (currentTool === 'duct') {
-        if (!currentPolyline) {
+    if(currentTool === 'duct'){
+        if(!currentPolyline){
             currentPolyline = { type: 'duct', points: [{ x: pos.x, y: pos.y }] };
         } else {
             currentPolyline.points.push({ x: pos.x, y: pos.y });
@@ -483,38 +688,13 @@ drawCanvas.addEventListener('click', function(e) {
             currentPolyline = null;
             saveState();
         }
-        redraw();
-        return;
-    }
-
-    if (currentTool === 'duct_elbow') {
-        // 3 clicks: corner, end1, end2 - makes L-shape
-        if (!currentPolyline) {
-            currentPolyline = { type: 'duct_elbow_temp', corner: { x: pos.x, y: pos.y }, points: [] };
-        } else if (currentPolyline.points.length === 0) {
-            currentPolyline.points.push({ x: pos.x, y: pos.y });
-        } else {
-            currentPolyline.points.push({ x: pos.x, y: pos.y });
-            // Create two duct segments forming an L
-            elements.push({
-                type: 'duct',
-                points: [currentPolyline.points[0], currentPolyline.corner]
-            });
-            elements.push({
-                type: 'duct',
-                points: [currentPolyline.corner, currentPolyline.points[1]]
-            });
-            currentPolyline = null;
-            saveState();
-        }
-        redraw();
-        return;
+        redraw(); return;
     }
 });
 
-drawCanvas.addEventListener('dblclick', function(e) {
-    if (currentPolyline && currentPolyline.points && currentPolyline.points.length >= 2) {
-        if (currentPolyline.type === 'extwall' && currentPolyline.points.length >= 3) {
+drawCanvas.addEventListener('dblclick', function(e){
+    if(currentPolyline && currentPolyline.points && currentPolyline.points.length >= 2){
+        if(currentPolyline.type === 'extwall' && currentPolyline.points.length >= 3){
             currentPolyline.closed = true;
         }
         elements.push(currentPolyline);
@@ -524,161 +704,108 @@ drawCanvas.addEventListener('dblclick', function(e) {
     }
 });
 
-drawCanvas.addEventListener('mousemove', function(e) {
+drawCanvas.addEventListener('mousemove', function(e){
     const pos = getMousePos(e);
     hoverPoint = pos;
-
-    if (currentTool === 'move' && selectedElement && dragOffset) {
+    if(currentTool === 'move' && selectedElement && dragOffset){
         moveElement(selectedElement, pos.x - dragOffset.x, pos.y - dragOffset.y);
-        const center = getElementCenter(selectedElement);
-        dragOffset = { x: pos.x - center.x, y: pos.y - center.y };
+        const c = getElementCenter(selectedElement);
+        dragOffset = { x: pos.x - c.x, y: pos.y - c.y };
         redraw();
         return;
     }
-
-    if (currentPolyline) redraw();
+    if(currentPolyline) redraw();
 });
 
-drawCanvas.addEventListener('mousedown', function(e) {
-    if (currentTool !== 'move') return;
+drawCanvas.addEventListener('mousedown', function(e){
+    if(currentTool !== 'move') return;
     const pos = getMousePos(e);
     const idx = findElementAt(pos);
-    if (idx !== -1) {
+    if(idx !== -1){
         selectedElement = elements[idx];
-        const center = getElementCenter(selectedElement);
-        dragOffset = { x: pos.x - center.x, y: pos.y - center.y };
+        const c = getElementCenter(selectedElement);
+        dragOffset = { x: pos.x - c.x, y: pos.y - c.y };
     }
 });
 
-drawCanvas.addEventListener('mouseup', function() {
-    if (selectedElement) {
-        saveState();
-        selectedElement = null;
-        dragOffset = null;
-    }
+drawCanvas.addEventListener('mouseup', function(){
+    if(selectedElement){ saveState(); selectedElement = null; dragOffset = null; }
 });
 
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape' && currentPolyline) {
-        currentPolyline = null;
-        redraw();
-    }
+document.addEventListener('keydown', function(e){
+    if(e.key === 'Escape' && currentPolyline){ currentPolyline = null; redraw(); }
 });
 
-function findElementAt(pos) {
-    for (let i = elements.length - 1; i >= 0; i--) {
+function findElementAt(pos){
+    for(let i = elements.length - 1; i >= 0; i--){
         const el = elements[i];
-        if (el.type === 'vav' || el.type === 'ahu' || el.type === 'diffuser') {
-            const dx = pos.x - el.x;
-            const dy = pos.y - el.y;
-            if (Math.sqrt(dx * dx + dy * dy) < 25) return i;
-        } else if (el.points) {
-            for (const p of el.points) {
-                const dx = pos.x - p.x;
-                const dy = pos.y - p.y;
-                if (Math.sqrt(dx * dx + dy * dy) < 15) return i;
+        if(el.type === 'vav' || el.type === 'ahu' || el.type === 'diffuser'){
+            if(Math.hypot(pos.x - el.x, pos.y - el.y) < 25) return i;
+        } else if(el.points){
+            for(const p of el.points){
+                if(Math.hypot(pos.x - p.x, pos.y - p.y) < 15) return i;
             }
         }
     }
     return -1;
 }
 
-function getElementCenter(el) {
-    if (el.type === 'vav' || el.type === 'ahu' || el.type === 'diffuser') {
+function getElementCenter(el){
+    if(el.type === 'vav' || el.type === 'ahu' || el.type === 'diffuser'){
         return { x: el.x, y: el.y };
     }
-    if (!el.points) return { x: 0, y: 0 };
+    if(!el.points) return { x: 0, y: 0 };
     let sx = 0, sy = 0;
-    for (const p of el.points) { sx += p.x; sy += p.y; }
+    for(const p of el.points){ sx += p.x; sy += p.y; }
     return { x: sx / el.points.length, y: sy / el.points.length };
 }
 
-function moveElement(el, dx, dy) {
-    if (el.type === 'vav' || el.type === 'ahu' || el.type === 'diffuser') {
-        el.x += dx;
-        el.y += dy;
-    } else if (el.points) {
-        for (const p of el.points) { p.x += dx; p.y += dy; }
+function moveElement(el, dx, dy){
+    if(el.type === 'vav' || el.type === 'ahu' || el.type === 'diffuser'){
+        el.x += dx; el.y += dy;
+    } else if(el.points){
+        for(const p of el.points){ p.x += dx; p.y += dy; }
     }
 }
 
-function autoBranchDiffusers() {
+function autoBranchDiffusers(){
     const ducts = elements.filter(e => e.type === 'duct' && e.points && e.points.length >= 2);
     const diffusers = elements.filter(e => e.type === 'diffuser');
-
-    if (ducts.length === 0) {
-        alert('Draw some ducts first!');
-        return;
-    }
-    if (diffusers.length === 0) {
-        alert('Place some diffusers first!');
-        return;
-    }
-
-    // Remove old branch lines
+    if(ducts.length === 0){ alert('Draw ducts first!'); return; }
+    if(diffusers.length === 0){ alert('Place diffusers first!'); return; }
     elements = elements.filter(e => e.type !== 'branch');
-
     diffusers.forEach(diff => {
-        // Find nearest point on any duct
-        let bestDist = Infinity;
-        let bestPoint = null;
+        let bestDist = Infinity, bestPoint = null;
         ducts.forEach(duct => {
-            for (let i = 0; i < duct.points.length - 1; i++) {
-                const p1 = duct.points[i];
-                const p2 = duct.points[i + 1];
-                const np = nearestPointOnSegment(diff, p1, p2);
+            for(let i = 0; i < duct.points.length - 1; i++){
+                const np = nearestPointOnSegment(diff, duct.points[i], duct.points[i+1]);
                 const d = Math.hypot(np.x - diff.x, np.y - diff.y);
-                if (d < bestDist) {
-                    bestDist = d;
-                    bestPoint = np;
-                }
+                if(d < bestDist){ bestDist = d; bestPoint = np; }
             }
         });
-        if (bestPoint && bestDist < 200) {
-            elements.push({
-                type: 'branch',
-                points: [{ x: diff.x, y: diff.y }, bestPoint]
-            });
+        if(bestPoint && bestDist < 200){
+            elements.push({ type: 'branch', points: [{ x: diff.x, y: diff.y }, bestPoint] });
         }
     });
     saveState();
     redraw();
 }
 
-function nearestPointOnSegment(p, a, b) {
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const lenSq = dx * dx + dy * dy;
-    if (lenSq < 0.01) return { x: a.x, y: a.y };
-    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+function nearestPointOnSegment(p, a, b){
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const ls = dx*dx + dy*dy;
+    if(ls < 0.01) return { x: a.x, y: a.y };
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / ls;
     t = Math.max(0, Math.min(1, t));
-    return { x: a.x + t * dx, y: a.y + t * dy };
+    return { x: a.x + t*dx, y: a.y + t*dy };
 }
 
-function redraw() {
+function redraw(){
     drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-    for (const el of elements) drawElement(el);
-
-    if (currentPolyline) {
-        if (currentPolyline.type === 'duct_elbow_temp') {
-            // Draw corner marker
-            drawCtx.fillStyle = '#ffaa00';
-            drawCtx.beginPath();
-            drawCtx.arc(currentPolyline.corner.x, currentPolyline.corner.y, 8, 0, Math.PI * 2);
-            drawCtx.fill();
-            // Draw line from clicked points
-            if (currentPolyline.points.length > 0) {
-                drawCtx.strokeStyle = COLORS.duct;
-                drawCtx.lineWidth = 4;
-                drawCtx.beginPath();
-                drawCtx.moveTo(currentPolyline.points[0].x, currentPolyline.points[0].y);
-                drawCtx.lineTo(currentPolyline.corner.x, currentPolyline.corner.y);
-                drawCtx.stroke();
-            }
-        } else {
-            drawElement(currentPolyline, true);
-        }
-        if (hoverPoint && currentPolyline.points && currentPolyline.points.length > 0) {
+    for(const el of elements) drawElement(el);
+    if(currentPolyline){
+        drawElement(currentPolyline, true);
+        if(hoverPoint && currentPolyline.points && currentPolyline.points.length > 0){
             const last = currentPolyline.points[currentPolyline.points.length - 1];
             drawCtx.strokeStyle = COLORS[currentPolyline.type] || '#fff';
             drawCtx.lineWidth = 3;
@@ -692,10 +819,11 @@ function redraw() {
     }
 }
 
-function drawElement(el, isInProgress = false) {
+function drawElement(el, inProgress = false){
     const color = COLORS[el.type] || '#fff';
+    const detectedAlpha = el.detected ? 0.7 : 1.0;
 
-    if (el.type === 'vav') {
+    if(el.type === 'vav'){
         drawCtx.fillStyle = color;
         drawCtx.strokeStyle = '#fff';
         drawCtx.lineWidth = 2;
@@ -705,8 +833,7 @@ function drawElement(el, isInProgress = false) {
         drawCtx.stroke();
         return;
     }
-
-    if (el.type === 'ahu') {
+    if(el.type === 'ahu'){
         drawCtx.fillStyle = color;
         drawCtx.strokeStyle = '#fff';
         drawCtx.lineWidth = 2;
@@ -714,8 +841,7 @@ function drawElement(el, isInProgress = false) {
         drawCtx.strokeRect(el.x - 20, el.y - 15, 40, 30);
         return;
     }
-
-    if (el.type === 'diffuser') {
+    if(el.type === 'diffuser'){
         drawCtx.fillStyle = color;
         drawCtx.strokeStyle = '#666';
         drawCtx.lineWidth = 1.5;
@@ -723,9 +849,8 @@ function drawElement(el, isInProgress = false) {
         drawCtx.strokeRect(el.x - 5, el.y - 5, 10, 10);
         return;
     }
-
-    if (el.type === 'branch') {
-        if (!el.points || el.points.length < 2) return;
+    if(el.type === 'branch'){
+        if(!el.points || el.points.length < 2) return;
         drawCtx.strokeStyle = '#888';
         drawCtx.lineWidth = 2;
         drawCtx.setLineDash([3, 3]);
@@ -736,29 +861,29 @@ function drawElement(el, isInProgress = false) {
         drawCtx.setLineDash([]);
         return;
     }
-
-    if (!el.points || el.points.length === 0) return;
+    if(!el.points || el.points.length === 0) return;
 
     drawCtx.strokeStyle = color;
+    drawCtx.globalAlpha = detectedAlpha;
     drawCtx.lineWidth = el.type === 'duct' ? 4 : 5;
     drawCtx.lineCap = 'round';
     drawCtx.lineJoin = 'round';
     drawCtx.beginPath();
     drawCtx.moveTo(el.points[0].x, el.points[0].y);
-    for (let i = 1; i < el.points.length; i++) {
+    for(let i = 1; i < el.points.length; i++){
         drawCtx.lineTo(el.points[i].x, el.points[i].y);
     }
-    if (el.closed) drawCtx.closePath();
+    if(el.closed) drawCtx.closePath();
     drawCtx.stroke();
+    drawCtx.globalAlpha = 1.0;
 
     drawCtx.fillStyle = color;
-    for (const p of el.points) {
+    for(const p of el.points){
         drawCtx.beginPath();
         drawCtx.arc(p.x, p.y, 5, 0, Math.PI * 2);
         drawCtx.fill();
     }
-
-    if (isInProgress && el.points.length > 0) {
+    if(inProgress && el.points.length > 0){
         const first = el.points[0];
         drawCtx.strokeStyle = '#fff';
         drawCtx.lineWidth = 2;
@@ -768,35 +893,33 @@ function drawElement(el, isInProgress = false) {
     }
 }
 
-function saveState() {
+function saveState(){
     history.push(JSON.stringify(elements));
-    if (history.length > 40) history.shift();
+    if(history.length > 40) history.shift();
 }
 
-function undo() {
-    if (history.length < 2) return;
+function undo(){
+    if(history.length < 2) return;
     history.pop();
     elements = JSON.parse(history[history.length - 1]);
     currentPolyline = null;
     redraw();
 }
 
-function clearAll() {
-    if (!confirm('Clear everything?')) return;
+function clearAll(){
+    if(!confirm('Clear everything?')) return;
     elements = [];
     currentPolyline = null;
     saveState();
     redraw();
 }
 
-async function generate() {
-    if (currentPolyline && currentPolyline.points && currentPolyline.points.length >= 2) {
+async function generate(){
+    if(currentPolyline && currentPolyline.points && currentPolyline.points.length >= 2){
         elements.push(currentPolyline);
         currentPolyline = null;
     }
-
     document.getElementById('loading').classList.add('active');
-
     try {
         const response = await fetch('/process', {
             method: 'POST',
@@ -808,53 +931,43 @@ async function generate() {
             })
         });
         const result = await response.json();
-        if (result.success) {
-            window.location.href = '/result';
-        } else {
-            alert('Error: ' + result.error);
-            document.getElementById('loading').classList.remove('active');
-        }
+        if(result.success){ window.location.href = '/result'; }
+        else { alert('Error: ' + result.error); document.getElementById('loading').classList.remove('active'); }
     } catch (err) {
         alert('Error: ' + err.message);
         document.getElementById('loading').classList.remove('active');
     }
 }
 </script>
-</body>
-</html>'''
+</body></html>'''
 
 
 RESULT_PAGE = '''<!DOCTYPE html>
-<html>
-<head>
-<title>BAS Graphic v22</title>
+<html><head><title>BAS Graphic v23</title>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #0d0f14; color: white; font-family: 'Segoe UI', Arial, sans-serif; padding: 12px; }
-h1 { text-align: center; font-size: 22px; margin-bottom: 4px; background: linear-gradient(135deg, #2d89ef, #b388ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-.sub { text-align: center; color: #6878a8; font-size: 12px; margin-bottom: 10px; }
-.stats { display: flex; justify-content: center; gap: 10px; margin: 8px 0 12px; flex-wrap: wrap; }
-.stat { background: #1e2233; padding: 5px 12px; border-radius: 8px; font-size: 12px; color: #aab0c4; border: 1px solid #2a3050; }
-.stat b { color: #fff; }
-.viewer-svg { width: 100%; height: 78vh; background: #1a1d24; border-radius: 12px; border: 1px solid #2a3050; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 20px; }
-.viewer-svg svg { max-width: 100%; height: auto; }
-.actions { text-align: center; margin-top: 12px; display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
-.btn { padding: 10px 18px; border: none; border-radius: 10px; font-size: 13px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-block; }
-.btn-blue { background: #1a6fd4; color: white; }
-.btn-green { background: #1a9e4a; color: white; }
-.btn-gray { background: #252a38; color: #aab0c4; }
-.footer { text-align: center; color: #3a4060; font-size: 11px; margin-top: 10px; }
-</style>
-</head>
-<body>
-<h1>Synchrony BAS Graphic v22</h1>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:12px;}
+h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient(135deg,#2d89ef,#b388ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.sub{text-align:center;color:#6878a8;font-size:12px;margin-bottom:10px;}
+.stats{display:flex;justify-content:center;gap:10px;margin:8px 0 12px;flex-wrap:wrap;}
+.stat{background:#1e2233;padding:5px 12px;border-radius:8px;font-size:12px;color:#aab0c4;border:1px solid #2a3050;}
+.stat b{color:#fff;}
+.viewer-svg{width:100%;height:78vh;background:#1a1d24;border-radius:12px;border:1px solid #2a3050;overflow:auto;display:flex;align-items:center;justify-content:center;padding:20px;}
+.viewer-svg svg{max-width:100%;height:auto;}
+.actions{text-align:center;margin-top:12px;display:flex;justify-content:center;gap:8px;flex-wrap:wrap;}
+.btn{padding:10px 18px;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block;}
+.btn-blue{background:#1a6fd4;color:white;}
+.btn-green{background:#1a9e4a;color:white;}
+.btn-gray{background:#252a38;color:#aab0c4;}
+.footer{text-align:center;color:#3a4060;font-size:11px;margin-top:10px;}
+</style></head><body>
+<h1>Synchrony BAS Graphic v23</h1>
 <p class="sub">SVG Isometric Render - Ready for Tracer Synchrony / Niagara</p>
 <div class="stats">
 <div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
 <div class="stat">AHUs: <b>{{ n_ahus }}</b></div>
 <div class="stat">Ducts: <b>{{ n_ducts }}</b></div>
 <div class="stat">Diffusers: <b>{{ n_diffs }}</b></div>
-<div class="stat">Branches: <b>{{ n_branches }}</b></div>
 <div class="stat">Walls: <b>{{ n_walls }}</b></div>
 </div>
 <div class="viewer-svg" id="svgViewer"></div>
@@ -868,43 +981,31 @@ h1 { text-align: center; font-size: 22px; margin-bottom: 4px; background: linear
 
 <script>
 const data = {{ detection_json | safe }};
-
-// Lower isometric angle for more horizontal view
-const ISO_ANGLE = Math.PI / 9;  // 20 degrees (more horizontal than 30)
+const ISO_ANGLE = Math.PI / 9;
 const COS_ISO = Math.cos(ISO_ANGLE);
 const SIN_ISO = Math.sin(ISO_ANGLE);
 
-function isoProject(x, y, z) {
+function isoProject(x, y, z){
     const sx = (x - y) * COS_ISO;
     const sy = (x + y) * SIN_ISO - z;
     return [sx, sy];
 }
 
-function generateSVG() {
+function generateSVG(){
     const elements = data.elements || [];
     const extWall = elements.find(e => e.type === 'extwall' && e.points && e.points.length >= 3);
-
     let minX = 0, maxX = data.image_width, minY = 0, maxY = data.image_height;
-    if (extWall) {
+    if(extWall){
         const xs = extWall.points.map(p => p.x);
         const ys = extWall.points.map(p => p.y);
-        minX = Math.min(...xs);
-        maxX = Math.max(...xs);
-        minY = Math.min(...ys);
-        maxY = Math.max(...ys);
+        minX = Math.min(...xs); maxX = Math.max(...xs);
+        minY = Math.min(...ys); maxY = Math.max(...ys);
     }
     const bcx = (minX + maxX) / 2;
     const bcy = (minY + maxY) / 2;
-
     const WALL_HEIGHT = 50;
-
-    function toLocal(p) {
-        return { x: p.x - bcx, y: p.y - bcy };
-    }
-
-    function proj(x, y, z = 0) {
-        return isoProject(x, y, z);
-    }
+    function toLocal(p){ return { x: p.x - bcx, y: p.y - bcy }; }
+    function proj(x, y, z = 0){ return isoProject(x, y, z); }
 
     let svgMinX = 0, svgMaxX = 0, svgMinY = 0, svgMaxY = 0;
     const corners = [
@@ -913,33 +1014,28 @@ function generateSVG() {
         toLocal({ x: maxX, y: maxY }),
         toLocal({ x: minX, y: maxY })
     ];
-    for (const c of corners) {
-        for (const z of [0, WALL_HEIGHT + 15]) {
+    for(const c of corners){
+        for(const z of [0, WALL_HEIGHT + 15]){
             const [sx, sy] = proj(c.x, c.y, z);
-            svgMinX = Math.min(svgMinX, sx);
-            svgMaxX = Math.max(svgMaxX, sx);
-            svgMinY = Math.min(svgMinY, sy);
-            svgMaxY = Math.max(svgMaxY, sy);
+            svgMinX = Math.min(svgMinX, sx); svgMaxX = Math.max(svgMaxX, sx);
+            svgMinY = Math.min(svgMinY, sy); svgMaxY = Math.max(svgMaxY, sy);
         }
     }
-
     const padding = 60;
     const svgW = svgMaxX - svgMinX + padding * 2;
     const svgH = svgMaxY - svgMinY + padding * 2;
     const offsetX = -svgMinX + padding;
     const offsetY = -svgMinY + padding;
 
-    function projSVG(x, y, z = 0) {
+    function projSVG(x, y, z = 0){
         const [sx, sy] = proj(x, y, z);
         return [sx + offsetX, sy + offsetY];
     }
 
     let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${svgW} ${svgH}" width="${svgW}" height="${svgH}">`;
     svg += `<rect width="${svgW}" height="${svgH}" fill="#0a0a0d"/>`;
-
     svg += `<defs>`;
 
-    // Uniform light gray floor with VERY subtle isometric grid
     const tileW = 40 * COS_ISO * 2;
     const tileH = 40 * SIN_ISO * 2;
     svg += `<pattern id="isoFloor" width="${tileW}" height="${tileH}" patternUnits="userSpaceOnUse">`;
@@ -947,285 +1043,158 @@ function generateSVG() {
     svg += `<polygon points="${tileW/2},0 ${tileW},${tileH/2} ${tileW/2},${tileH} 0,${tileH/2}" fill="none" stroke="#cfcfd3" stroke-width="0.4" opacity="0.6"/>`;
     svg += `</pattern>`;
 
-    // Wall gradients
-    svg += `<linearGradient id="extWallSide" x1="0%" y1="0%" x2="0%" y2="100%">`;
-    svg += `<stop offset="0%" stop-color="#c8c8ce"/>`;
-    svg += `<stop offset="100%" stop-color="#929298"/>`;
-    svg += `</linearGradient>`;
-    svg += `<linearGradient id="extWallTop" x1="0%" y1="0%" x2="100%" y2="100%">`;
-    svg += `<stop offset="0%" stop-color="#e8e8ec"/>`;
-    svg += `<stop offset="100%" stop-color="#b8b8bc"/>`;
-    svg += `</linearGradient>`;
-    svg += `<linearGradient id="intWallSide" x1="0%" y1="0%" x2="0%" y2="100%">`;
-    svg += `<stop offset="0%" stop-color="#d4d4d8"/>`;
-    svg += `<stop offset="100%" stop-color="#a8a8ac"/>`;
-    svg += `</linearGradient>`;
-    svg += `<linearGradient id="intWallTop" x1="0%" y1="0%" x2="100%" y2="100%">`;
-    svg += `<stop offset="0%" stop-color="#ebebef"/>`;
-    svg += `<stop offset="100%" stop-color="#c4c4c8"/>`;
-    svg += `</linearGradient>`;
-    svg += `<linearGradient id="wallEnd" x1="0%" y1="0%" x2="100%" y2="0%">`;
-    svg += `<stop offset="0%" stop-color="#bababf"/>`;
-    svg += `<stop offset="100%" stop-color="#9b9ba0"/>`;
-    svg += `</linearGradient>`;
-
-    // Duct: bright white top, gray sides for tube effect
-    svg += `<linearGradient id="ductTop" x1="0%" y1="0%" x2="0%" y2="100%">`;
-    svg += `<stop offset="0%" stop-color="#ffffff"/>`;
-    svg += `<stop offset="50%" stop-color="#f0f0f4"/>`;
-    svg += `<stop offset="100%" stop-color="#d8d8dc"/>`;
-    svg += `</linearGradient>`;
-    svg += `<linearGradient id="ductSide" x1="0%" y1="0%" x2="0%" y2="100%">`;
-    svg += `<stop offset="0%" stop-color="#c8c8cc"/>`;
-    svg += `<stop offset="100%" stop-color="#a0a0a4"/>`;
-    svg += `</linearGradient>`;
-
-    // VAV gradients (smaller now)
-    svg += `<linearGradient id="vavTop" x1="0%" y1="0%" x2="100%" y2="100%">`;
-    svg += `<stop offset="0%" stop-color="#3b6df0"/>`;
-    svg += `<stop offset="100%" stop-color="#1e40af"/>`;
-    svg += `</linearGradient>`;
-    svg += `<linearGradient id="vavFront" x1="0%" y1="0%" x2="0%" y2="100%">`;
-    svg += `<stop offset="0%" stop-color="#1e3a8a"/>`;
-    svg += `<stop offset="100%" stop-color="#152a6e"/>`;
-    svg += `</linearGradient>`;
-    svg += `<linearGradient id="vavRight" x1="0%" y1="0%" x2="100%" y2="0%">`;
-    svg += `<stop offset="0%" stop-color="#1e40af"/>`;
-    svg += `<stop offset="100%" stop-color="#0c1f5c"/>`;
-    svg += `</linearGradient>`;
-
-    // AHU gradients
-    svg += `<linearGradient id="ahuTop" x1="0%" y1="0%" x2="100%" y2="100%">`;
-    svg += `<stop offset="0%" stop-color="#34d365"/>`;
-    svg += `<stop offset="100%" stop-color="#16a34a"/>`;
-    svg += `</linearGradient>`;
-    svg += `<linearGradient id="ahuFront" x1="0%" y1="0%" x2="0%" y2="100%">`;
-    svg += `<stop offset="0%" stop-color="#15803d"/>`;
-    svg += `<stop offset="100%" stop-color="#0a5828"/>`;
-    svg += `</linearGradient>`;
-    svg += `<linearGradient id="ahuRight" x1="0%" y1="0%" x2="100%" y2="0%">`;
-    svg += `<stop offset="0%" stop-color="#16a34a"/>`;
-    svg += `<stop offset="100%" stop-color="#0c5a26"/>`;
-    svg += `</linearGradient>`;
-
+    svg += `<linearGradient id="extSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#c8c8ce"/><stop offset="100%" stop-color="#929298"/></linearGradient>`;
+    svg += `<linearGradient id="extTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#e8e8ec"/><stop offset="100%" stop-color="#b8b8bc"/></linearGradient>`;
+    svg += `<linearGradient id="intSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#d4d4d8"/><stop offset="100%" stop-color="#a8a8ac"/></linearGradient>`;
+    svg += `<linearGradient id="intTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#ebebef"/><stop offset="100%" stop-color="#c4c4c8"/></linearGradient>`;
+    svg += `<linearGradient id="wallEnd" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#bababf"/><stop offset="100%" stop-color="#9b9ba0"/></linearGradient>`;
+    svg += `<linearGradient id="ductTop" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#ffffff"/><stop offset="100%" stop-color="#d8d8dc"/></linearGradient>`;
+    svg += `<linearGradient id="ductSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#c8c8cc"/><stop offset="100%" stop-color="#a0a0a4"/></linearGradient>`;
+    svg += `<linearGradient id="vavTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3b6df0"/><stop offset="100%" stop-color="#1e40af"/></linearGradient>`;
+    svg += `<linearGradient id="vavFront" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#1e3a8a"/><stop offset="100%" stop-color="#152a6e"/></linearGradient>`;
+    svg += `<linearGradient id="vavRight" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#1e40af"/><stop offset="100%" stop-color="#0c1f5c"/></linearGradient>`;
+    svg += `<linearGradient id="ahuTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#34d365"/><stop offset="100%" stop-color="#16a34a"/></linearGradient>`;
+    svg += `<linearGradient id="ahuFront" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#15803d"/><stop offset="100%" stop-color="#0a5828"/></linearGradient>`;
+    svg += `<linearGradient id="ahuRight" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#16a34a"/><stop offset="100%" stop-color="#0c5a26"/></linearGradient>`;
     svg += `</defs>`;
 
-    // === FLOOR ===
-    if (extWall) {
+    if(extWall){
         const pts = extWall.points.map(p => toLocal(p));
-        let floorPath = '';
-        for (let i = 0; i < pts.length; i++) {
+        let path = '';
+        for(let i = 0; i < pts.length; i++){
             const [sx, sy] = projSVG(pts[i].x, pts[i].y, 0);
-            floorPath += (i === 0 ? 'M' : 'L') + sx + ',' + sy + ' ';
+            path += (i === 0 ? 'M' : 'L') + sx + ',' + sy + ' ';
         }
-        floorPath += 'Z';
-        svg += `<path d="${floorPath}" fill="url(#isoFloor)" stroke="#a0a0a4" stroke-width="0.4"/>`;
-        // Subtle inner shadow
-        svg += `<path d="${floorPath}" fill="none" stroke="#888" stroke-width="1.2" opacity="0.15"/>`;
+        path += 'Z';
+        svg += `<path d="${path}" fill="url(#isoFloor)" stroke="#a0a0a4" stroke-width="0.4"/>`;
     }
 
-    // === WALL DRAWING ===
-    function drawThickWall(p1, p2, height, thickness, sideGrad, topGrad, stroke) {
-        const dx = p2.x - p1.x;
-        const dy = p2.y - p1.y;
-        const len = Math.sqrt(dx * dx + dy * dy);
-        if (len < 1) return '';
+    function drawThickWall(p1, p2, height, thickness, sideG, topG, stroke){
+        const dx = p2.x - p1.x, dy = p2.y - p1.y;
+        const len = Math.sqrt(dx*dx + dy*dy);
+        if(len < 1) return '';
         const nx = -dy / len * thickness / 2;
         const ny = dx / len * thickness / 2;
-
         const p1a = { x: p1.x + nx, y: p1.y + ny };
         const p1b = { x: p1.x - nx, y: p1.y - ny };
         const p2a = { x: p2.x + nx, y: p2.y + ny };
         const p2b = { x: p2.x - nx, y: p2.y - ny };
-
         const [b1ax, b1ay] = projSVG(p1a.x, p1a.y, 0);
         const [b1bx, b1by] = projSVG(p1b.x, p1b.y, 0);
         const [b2bx, b2by] = projSVG(p2b.x, p2b.y, 0);
-
         const [t1ax, t1ay] = projSVG(p1a.x, p1a.y, height);
         const [t2ax, t2ay] = projSVG(p2a.x, p2a.y, height);
         const [t1bx, t1by] = projSVG(p1b.x, p1b.y, height);
         const [t2bx, t2by] = projSVG(p2b.x, p2b.y, height);
-
-        let walls = '';
-        // Front face
-        walls += `<path d="M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="${sideGrad}" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
-        // Top face
-        walls += `<path d="M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="${topGrad}" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
-        // End cap
-        walls += `<path d="M ${b1ax},${b1ay} L ${b1bx},${b1by} L ${t1bx},${t1by} L ${t1ax},${t1ay} Z" fill="url(#wallEnd)" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
-        return walls;
+        let w = '';
+        w += `<path d="M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="${sideG}" stroke="${stroke}" stroke-width="0.5"/>`;
+        w += `<path d="M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="${topG}" stroke="${stroke}" stroke-width="0.5"/>`;
+        w += `<path d="M ${b1ax},${b1ay} L ${b1bx},${b1by} L ${t1bx},${t1by} L ${t1ax},${t1ay} Z" fill="url(#wallEnd)" stroke="${stroke}" stroke-width="0.5"/>`;
+        return w;
     }
 
-    // EXT WALLS
-    if (extWall && extWall.points.length >= 2) {
+    if(extWall && extWall.points.length >= 2){
         const pts = extWall.points.map(p => toLocal(p));
-        for (let i = 0; i < pts.length - 1; i++) {
-            svg += drawThickWall(pts[i], pts[i + 1], WALL_HEIGHT, 14, 'url(#extWallSide)', 'url(#extWallTop)', '#5a5d63');
+        for(let i = 0; i < pts.length - 1; i++){
+            svg += drawThickWall(pts[i], pts[i+1], WALL_HEIGHT, 14, 'url(#extSide)', 'url(#extTop)', '#5a5d63');
         }
-        if (pts.length >= 3) {
-            svg += drawThickWall(pts[pts.length - 1], pts[0], WALL_HEIGHT, 14, 'url(#extWallSide)', 'url(#extWallTop)', '#5a5d63');
+        if(pts.length >= 3){
+            svg += drawThickWall(pts[pts.length-1], pts[0], WALL_HEIGHT, 14, 'url(#extSide)', 'url(#extTop)', '#5a5d63');
         }
     }
 
-    // INT WALLS
     elements.forEach(el => {
-        if (el.type === 'intwall' && el.points && el.points.length >= 2) {
+        if(el.type === 'intwall' && el.points && el.points.length >= 2){
             const pts = el.points.map(p => toLocal(p));
-            for (let i = 0; i < pts.length - 1; i++) {
-                svg += drawThickWall(pts[i], pts[i + 1], WALL_HEIGHT * 0.92, 8, 'url(#intWallSide)', 'url(#intWallTop)', '#6a6d73');
+            for(let i = 0; i < pts.length - 1; i++){
+                svg += drawThickWall(pts[i], pts[i+1], WALL_HEIGHT * 0.92, 8, 'url(#intSide)', 'url(#intTop)', '#6a6d73');
             }
         }
     });
 
-    // === DUCTS as REAL TUBES with grosor ===
-    function drawDuctTube(p1, p2, zLevel) {
-        const dx = p2.x - p1.x;
-        const dy = p2.y - p1.y;
-        const len = Math.sqrt(dx * dx + dy * dy);
-        if (len < 1) return '';
-
-        const ductW = 13;  // duct width
-        const ductH = 9;   // duct height
-        const nx = -dy / len * ductW / 2;
-        const ny = dx / len * ductW / 2;
-
-        const p1a = { x: p1.x + nx, y: p1.y + ny };
-        const p1b = { x: p1.x - nx, y: p1.y - ny };
-        const p2a = { x: p2.x + nx, y: p2.y + ny };
-        const p2b = { x: p2.x - nx, y: p2.y - ny };
-
-        const [t1ax, t1ay] = projSVG(p1a.x, p1a.y, zLevel + ductH);
-        const [t2ax, t2ay] = projSVG(p2a.x, p2a.y, zLevel + ductH);
-        const [t1bx, t1by] = projSVG(p1b.x, p1b.y, zLevel + ductH);
-        const [t2bx, t2by] = projSVG(p2b.x, p2b.y, zLevel + ductH);
-        const [b1bx, b1by] = projSVG(p1b.x, p1b.y, zLevel);
-        const [b2bx, b2by] = projSVG(p2b.x, p2b.y, zLevel);
-        const [b1ax, b1ay] = projSVG(p1a.x, p1a.y, zLevel);
-        const [b2ax, b2ay] = projSVG(p2a.x, p2a.y, zLevel);
-
-        let d = '';
-        // Top face (brightest)
-        d += `<path d="M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="url(#ductTop)" stroke="#888" stroke-width="0.4"/>`;
-        // Front face (visible side)
-        d += `<path d="M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="url(#ductSide)" stroke="#888" stroke-width="0.4"/>`;
-        // End caps
-        d += `<path d="M ${b1ax},${b1ay} L ${b1bx},${b1by} L ${t1bx},${t1by} L ${t1ax},${t1ay} Z" fill="#bababf" stroke="#888" stroke-width="0.4"/>`;
-        d += `<path d="M ${b2ax},${b2ay} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t2ax},${t2ay} Z" fill="#bababf" stroke="#888" stroke-width="0.4"/>`;
-
-        return d;
-    }
-
-    // Ducts with shadow
     const ductElements = elements.filter(e => e.type === 'duct' && e.points && e.points.length >= 2);
-
-    // Duct shadows on floor
     ductElements.forEach(el => {
         const pts = el.points.map(p => toLocal(p));
-        for (let i = 0; i < pts.length - 1; i++) {
-            const dx = pts[i+1].x - pts[i].x;
-            const dy = pts[i+1].y - pts[i].y;
-            const len = Math.sqrt(dx * dx + dy * dy);
-            if (len < 1) continue;
-            const nx = -dy / len * 8;
-            const ny = dx / len * 8;
-            const sa = projSVG(pts[i].x + nx, pts[i].y + ny, 0.3);
-            const sb = projSVG(pts[i].x - nx, pts[i].y - ny, 0.3);
-            const sc = projSVG(pts[i+1].x - nx, pts[i+1].y - ny, 0.3);
-            const sd = projSVG(pts[i+1].x + nx, pts[i+1].y + ny, 0.3);
-            svg += `<path d="M ${sa[0]},${sa[1]} L ${sb[0]},${sb[1]} L ${sc[0]},${sc[1]} L ${sd[0]},${sd[1]} Z" fill="#000" opacity="0.13"/>`;
+        for(let i = 0; i < pts.length - 1; i++){
+            const p1 = pts[i], p2 = pts[i+1];
+            const dx = p2.x - p1.x, dy = p2.y - p1.y;
+            const len = Math.sqrt(dx*dx + dy*dy);
+            if(len < 1) continue;
+            const ductW = 13, ductH = 9;
+            const nx = -dy / len * ductW / 2;
+            const ny = dx / len * ductW / 2;
+            const p1a = { x: p1.x + nx, y: p1.y + ny };
+            const p1b = { x: p1.x - nx, y: p1.y - ny };
+            const p2a = { x: p2.x + nx, y: p2.y + ny };
+            const p2b = { x: p2.x - nx, y: p2.y - ny };
+            const zLevel = WALL_HEIGHT - 8;
+            const [t1ax, t1ay] = projSVG(p1a.x, p1a.y, zLevel + ductH);
+            const [t2ax, t2ay] = projSVG(p2a.x, p2a.y, zLevel + ductH);
+            const [t1bx, t1by] = projSVG(p1b.x, p1b.y, zLevel + ductH);
+            const [t2bx, t2by] = projSVG(p2b.x, p2b.y, zLevel + ductH);
+            const [b1bx, b1by] = projSVG(p1b.x, p1b.y, zLevel);
+            const [b2bx, b2by] = projSVG(p2b.x, p2b.y, zLevel);
+            const [b1ax, b1ay] = projSVG(p1a.x, p1a.y, zLevel);
+            const [b2ax, b2ay] = projSVG(p2a.x, p2a.y, zLevel);
+            svg += `<path d="M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="url(#ductTop)" stroke="#888" stroke-width="0.4"/>`;
+            svg += `<path d="M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="url(#ductSide)" stroke="#888" stroke-width="0.4"/>`;
+            svg += `<path d="M ${b1ax},${b1ay} L ${b1bx},${b1by} L ${t1bx},${t1by} L ${t1ax},${t1ay} Z" fill="#bababf" stroke="#888" stroke-width="0.4"/>`;
+            svg += `<path d="M ${b2ax},${b2ay} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t2ax},${t2ay} Z" fill="#bababf" stroke="#888" stroke-width="0.4"/>`;
         }
     });
 
-    // Actual ducts
-    ductElements.forEach(el => {
-        const pts = el.points.map(p => toLocal(p));
-        for (let i = 0; i < pts.length - 1; i++) {
-            svg += drawDuctTube(pts[i], pts[i + 1], WALL_HEIGHT - 8);
-        }
-    });
-
-    // === BRANCH LINES (diffuser to duct) ===
     elements.forEach(el => {
-        if (el.type === 'branch' && el.points && el.points.length === 2) {
+        if(el.type === 'branch' && el.points && el.points.length === 2){
             const p1 = toLocal(el.points[0]);
             const p2 = toLocal(el.points[1]);
             const z = WALL_HEIGHT - 4;
             const [s1x, s1y] = projSVG(p1.x, p1.y, z);
             const [s2x, s2y] = projSVG(p2.x, p2.y, z);
-            svg += `<line x1="${s1x}" y1="${s1y}" x2="${s2x}" y2="${s2y}" stroke="#444" stroke-width="2" stroke-linecap="round"/>`;
+            svg += `<line x1="${s1x}" y1="${s1y}" x2="${s2x}" y2="${s2y}" stroke="#444" stroke-width="2"/>`;
         }
     });
 
-    // === DIFFUSERS ===
     elements.forEach(el => {
-        if (el.type === 'diffuser') {
+        if(el.type === 'diffuser'){
             const p = toLocal({ x: el.x, y: el.y });
             const size = 6;
             const z = WALL_HEIGHT - 1;
-            const corners = [
-                { x: p.x - size, y: p.y - size },
-                { x: p.x + size, y: p.y - size },
-                { x: p.x + size, y: p.y + size },
-                { x: p.x - size, y: p.y + size }
+            const c = [
+                { x: p.x - size, y: p.y - size }, { x: p.x + size, y: p.y - size },
+                { x: p.x + size, y: p.y + size }, { x: p.x - size, y: p.y + size }
             ];
-            const proj4 = corners.map(c => projSVG(c.x, c.y, z));
-            const path = `M ${proj4[0][0]},${proj4[0][1]} L ${proj4[1][0]},${proj4[1][1]} L ${proj4[2][0]},${proj4[2][1]} L ${proj4[3][0]},${proj4[3][1]} Z`;
-            svg += `<path d="${path}" fill="#ffffff" stroke="#666" stroke-width="0.4"/>`;
-            // Inner cross detail
-            const c2 = projSVG(p.x, p.y - size, z + 0.1);
-            const c3 = projSVG(p.x, p.y + size, z + 0.1);
-            const c4 = projSVG(p.x - size, p.y, z + 0.1);
-            const c5 = projSVG(p.x + size, p.y, z + 0.1);
-            svg += `<line x1="${c2[0]}" y1="${c2[1]}" x2="${c3[0]}" y2="${c3[1]}" stroke="#aaa" stroke-width="0.3"/>`;
-            svg += `<line x1="${c4[0]}" y1="${c4[1]}" x2="${c5[0]}" y2="${c5[1]}" stroke="#aaa" stroke-width="0.3"/>`;
+            const proj4 = c.map(cp => projSVG(cp.x, cp.y, z));
+            svg += `<path d="M ${proj4[0][0]},${proj4[0][1]} L ${proj4[1][0]},${proj4[1][1]} L ${proj4[2][0]},${proj4[2][1]} L ${proj4[3][0]},${proj4[3][1]} Z" fill="#ffffff" stroke="#666" stroke-width="0.4"/>`;
         }
     });
 
-    // === ISO CUBE drawing ===
-    function drawIsoCube(centerX, centerY, halfSize, height, baseZ, topGrad, frontGrad, rightGrad, stroke) {
+    function drawCube(cx, cy, hs, h, bz, topG, frontG, rightG, stroke){
         const c = [
-            { x: centerX - halfSize, y: centerY - halfSize },
-            { x: centerX + halfSize, y: centerY - halfSize },
-            { x: centerX + halfSize, y: centerY + halfSize },
-            { x: centerX - halfSize, y: centerY + halfSize }
+            { x: cx - hs, y: cy - hs }, { x: cx + hs, y: cy - hs },
+            { x: cx + hs, y: cy + hs }, { x: cx - hs, y: cy + hs }
         ];
-        const b = c.map(p => projSVG(p.x, p.y, baseZ));
-        const t = c.map(p => projSVG(p.x, p.y, baseZ + height));
-
+        const b = c.map(p => projSVG(p.x, p.y, bz));
+        const t = c.map(p => projSVG(p.x, p.y, bz + h));
         let cube = '';
-        // Shadow
         const sh = c.map(p => projSVG(p.x + 3, p.y + 3, 0.4));
         cube += `<path d="M ${sh[0][0]},${sh[0][1]} L ${sh[1][0]},${sh[1][1]} L ${sh[2][0]},${sh[2][1]} L ${sh[3][0]},${sh[3][1]} Z" fill="#000" opacity="0.2"/>`;
-        // Top
-        cube += `<path d="M ${t[0][0]},${t[0][1]} L ${t[1][0]},${t[1][1]} L ${t[2][0]},${t[2][1]} L ${t[3][0]},${t[3][1]} Z" fill="${topGrad}" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
-        // Front
-        cube += `<path d="M ${b[3][0]},${b[3][1]} L ${b[2][0]},${b[2][1]} L ${t[2][0]},${t[2][1]} L ${t[3][0]},${t[3][1]} Z" fill="${frontGrad}" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
-        // Right
-        cube += `<path d="M ${b[1][0]},${b[1][1]} L ${b[2][0]},${b[2][1]} L ${t[2][0]},${t[2][1]} L ${t[1][0]},${t[1][1]} Z" fill="${rightGrad}" stroke="${stroke}" stroke-width="0.5" stroke-linejoin="round"/>`;
-        // Top highlights for bevel
-        cube += `<line x1="${t[0][0]}" y1="${t[0][1]}" x2="${t[1][0]}" y2="${t[1][1]}" stroke="#ffffff" stroke-width="0.8" opacity="0.4"/>`;
-        cube += `<line x1="${t[0][0]}" y1="${t[0][1]}" x2="${t[3][0]}" y2="${t[3][1]}" stroke="#ffffff" stroke-width="0.8" opacity="0.4"/>`;
+        cube += `<path d="M ${t[0][0]},${t[0][1]} L ${t[1][0]},${t[1][1]} L ${t[2][0]},${t[2][1]} L ${t[3][0]},${t[3][1]} Z" fill="${topG}" stroke="${stroke}" stroke-width="0.5"/>`;
+        cube += `<path d="M ${b[3][0]},${b[3][1]} L ${b[2][0]},${b[2][1]} L ${t[2][0]},${t[2][1]} L ${t[3][0]},${t[3][1]} Z" fill="${frontG}" stroke="${stroke}" stroke-width="0.5"/>`;
+        cube += `<path d="M ${b[1][0]},${b[1][1]} L ${b[2][0]},${b[2][1]} L ${t[2][0]},${t[2][1]} L ${t[1][0]},${t[1][1]} Z" fill="${rightG}" stroke="${stroke}" stroke-width="0.5"/>`;
         return cube;
     }
 
-    // VAVs - SMALLER (8 instead of 11)
     elements.forEach(el => {
-        if (el.type === 'vav') {
+        if(el.type === 'vav'){
             const p = toLocal({ x: el.x, y: el.y });
-            const baseZ = WALL_HEIGHT - 18;
-            svg += drawIsoCube(p.x, p.y, 8, 18, baseZ,
-                'url(#vavTop)', 'url(#vavFront)', 'url(#vavRight)', '#0c1c5c');
+            svg += drawCube(p.x, p.y, 8, 18, WALL_HEIGHT - 18, 'url(#vavTop)', 'url(#vavFront)', 'url(#vavRight)', '#0c1c5c');
         }
     });
 
-    // AHU - bigger
     elements.forEach(el => {
-        if (el.type === 'ahu') {
+        if(el.type === 'ahu'){
             const p = toLocal({ x: el.x, y: el.y });
-            const baseZ = WALL_HEIGHT - 26;
-            svg += drawIsoCube(p.x, p.y, 18, 26, baseZ,
-                'url(#ahuTop)', 'url(#ahuFront)', 'url(#ahuRight)', '#0a4220');
+            svg += drawCube(p.x, p.y, 18, 26, WALL_HEIGHT - 26, 'url(#ahuTop)', 'url(#ahuFront)', 'url(#ahuRight)', '#0a4220');
         }
     });
 
@@ -1236,7 +1205,7 @@ function generateSVG() {
 const svgContent = generateSVG();
 document.getElementById('svgViewer').innerHTML = svgContent;
 
-function downloadSVG() {
+function downloadSVG(){
     const blob = new Blob([svgContent], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -1246,11 +1215,11 @@ function downloadSVG() {
     URL.revokeObjectURL(url);
 }
 
-function downloadPNG() {
+function downloadPNG(){
     const svgBlob = new Blob([svgContent], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(svgBlob);
     const img = new Image();
-    img.onload = function() {
+    img.onload = function(){
         const canvas = document.createElement('canvas');
         canvas.width = img.width * 2;
         canvas.height = img.height * 2;
@@ -1258,7 +1227,7 @@ function downloadPNG() {
         ctx.fillStyle = '#0a0a0d';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        canvas.toBlob(function(blob) {
+        canvas.toBlob(function(blob){
             const purl = URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.download = 'bas_graphic.png';
@@ -1271,9 +1240,12 @@ function downloadPNG() {
     img.src = url;
 }
 </script>
-</body>
-</html>'''
+</body></html>'''
 
+
+# ============================================================
+# ROUTES
+# ============================================================
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -1296,8 +1268,7 @@ def logout():
 
 @app.before_request
 def require_login():
-    allowed_endpoints = ["login", "static"]
-    if request.endpoint in allowed_endpoints:
+    if request.endpoint in ["login", "static"]:
         return
     if request.cookies.get("bas_auth") == APP_PASSWORD:
         return
@@ -1313,7 +1284,7 @@ def home():
 def upload():
     file = request.files["file"]
     filename = file.filename.lower()
-    auto_detect = request.form.get("auto_detect", "false") == "true"
+    mode = request.form.get("mode", "manual")
 
     if filename.endswith(".pdf"):
         file.save(UPLOAD_PDF_PATH)
@@ -1338,19 +1309,27 @@ def upload():
     cv2.imwrite(UPLOAD_IMAGE_PATH, img)
 
     initial_elements = []
-    auto_detected = False
-    if auto_detect:
-        detection = auto_detect_colors(UPLOAD_IMAGE_PATH)
-        if detection:
-            initial_elements = detection["elements"]
-            auto_detected = True
+    detected_message = ""
+
+    if mode == "arch":
+        result = detect_architecture(UPLOAD_IMAGE_PATH)
+        if result:
+            initial_elements = result["elements"]
+            stats = result["stats"]
+            n_walls = sum(1 for e in initial_elements if e.get("type") in ("extwall", "intwall"))
+            detected_message = f"Auto-detected architecture: {n_walls} walls extracted from {stats['lines_raw']} raw lines. Review and adjust!"
+    elif mode == "color":
+        result = auto_detect_colors(UPLOAD_IMAGE_PATH)
+        if result:
+            initial_elements = result["elements"]
+            n_det = len(initial_elements)
+            detected_message = f"Auto-detected by colors: {n_det} HVAC elements found."
 
     return render_template_string(
         EDITOR_PAGE,
         image_b64=image_to_base64(UPLOAD_IMAGE_PATH),
         initial_elements=json.dumps(initial_elements),
-        auto_detected=auto_detected,
-        n_detected=len(initial_elements)
+        detected_message=detected_message
     )
 
 
@@ -1362,8 +1341,7 @@ def editor():
         EDITOR_PAGE,
         image_b64=image_to_base64(UPLOAD_IMAGE_PATH),
         initial_elements=json.dumps([]),
-        auto_detected=False,
-        n_detected=0
+        detected_message=""
     )
 
 
@@ -1396,14 +1374,13 @@ def result():
     n_ahus = sum(1 for e in elements if e.get("type") == "ahu")
     n_ducts = sum(1 for e in elements if e.get("type") == "duct")
     n_diffs = sum(1 for e in elements if e.get("type") == "diffuser")
-    n_branches = sum(1 for e in elements if e.get("type") == "branch")
     n_walls = sum(1 for e in elements if e.get("type") in ("extwall", "intwall"))
 
     return render_template_string(
         RESULT_PAGE,
         detection_json=json.dumps(detection),
         n_vavs=n_vavs, n_ahus=n_ahus, n_ducts=n_ducts,
-        n_diffs=n_diffs, n_branches=n_branches, n_walls=n_walls
+        n_diffs=n_diffs, n_walls=n_walls
     )
 
 
