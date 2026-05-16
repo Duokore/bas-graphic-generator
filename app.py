@@ -38,7 +38,7 @@ def pdf_to_png(pdf_path, out_path):
 
 
 # ============================================================
-# SMART FLOORPLAN ISOLATION (v23.5 NEW)
+# SMART FLOORPLAN ISOLATION (v24 NEW)
 # ============================================================
 
 def smart_isolate_floorplan(img):
@@ -498,7 +498,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 </style></head><body>
 <div class="card">
 <div class="logo">&#128274;</div>
-<h1>BAS Generator v23.5</h1>
+<h1>BAS Generator v24</h1>
 <p class="sub">Private Access</p>
 <form method="POST" action="/login">
 <input type="password" name="password" placeholder="Enter password" required autofocus>
@@ -510,7 +510,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 
 
 HOME_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Generator v23.5</title>
+<html><head><title>BAS Generator v24</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
@@ -538,11 +538,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v23.5 <span class="badge">SMART ISOLATION</span></h1>
+<h1>BAS Generator v24 <span class="badge">AERIAL RENDER</span></h1>
 <p class="sub">Auto-detect building floorplan + HVAC</p>
 
 <div class="tip">
-<b>v23.5 NEW:</b> Smart Floorplan Isolation removes title blocks, tables, and legends before detecting walls.
+<b>v24 NEW:</b> Top-down aerial cabinet projection - more like Tracer Synchrony graphics.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -592,7 +592,7 @@ function setMode(mode){
 
 
 EDITOR_PAGE = '''<!DOCTYPE html>
-<html><head><title>CAD Editor v23.5</title>
+<html><head><title>CAD Editor v24</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:8px;height:100vh;display:flex;flex-direction:column;overflow:hidden;}
@@ -627,7 +627,7 @@ canvas{display:block;}
 {% endif %}
 
 <div class="topbar">
-<h1>CAD Editor v23.5</h1>
+<h1>CAD Editor v24</h1>
 <div style="display:flex;gap:6px;">
 <button onclick="undo()" class="action-btn btn-gray">&#8617; Undo</button>
 <button onclick="clearAll()" class="action-btn btn-red">Clear</button>
@@ -1033,7 +1033,7 @@ async function generate(){
 
 
 RESULT_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Graphic v23.5</title>
+<html><head><title>BAS Graphic v24</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:12px;}
@@ -1051,8 +1051,8 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 .btn-gray{background:#252a38;color:#aab0c4;}
 .footer{text-align:center;color:#3a4060;font-size:11px;margin-top:10px;}
 </style></head><body>
-<h1>Synchrony BAS Graphic v23.5</h1>
-<p class="sub">More horizontal cabinet projection - Ready for Tracer Synchrony / Niagara</p>
+<h1>Synchrony BAS Graphic v24</h1>
+<p class="sub">Top-down aerial projection - Ready for Tracer Synchrony / Niagara</p>
 <div class="stats">
 <div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
 <div class="stat">AHUs: <b>{{ n_ahus }}</b></div>
@@ -1072,18 +1072,25 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 <script>
 const data = {{ detection_json | safe }};
 
-// === MORE HORIZONTAL PROJECTION (v23.5) ===
-// Cabinet-like projection: minimal Y-axis skew, slight angle for depth
-// X stays horizontal, Y moves slightly down, Z (height) goes up
-const SKEW_ANGLE = Math.PI / 14;  // ~12.8 degrees (much less than iso 30 deg)
-const COS_SK = Math.cos(SKEW_ANGLE);
-const SIN_SK = Math.sin(SKEW_ANGLE);
+// === TOP-DOWN AERIAL CABINET PROJECTION (v24) ===
+// True cabinet projection from above: floor compressed Y but kept large,
+// walls extruded vertically with subtle perspective.
+// Much more "looking down at the building" feel.
+const TILT_ANGLE = Math.PI / 4;  // 45 degrees - more aerial
+const COS_T = Math.cos(TILT_ANGLE);
+const SIN_T = Math.sin(TILT_ANGLE);
 
+// Aerial cabinet projection:
+// - X stays fully horizontal
+// - Y is compressed (multiplied by ~0.7) to give that top-down look
+// - Z (wall height) appears as small vertical lift
 function cabinetProject(x, y, z){
-    // Cabinet projection: X stays full-scale horizontal,
-    // Y is projected at angle (compressed), Z is vertical
-    const sx = x + y * COS_SK * 0.5;
-    const sy = y * SIN_SK - z;
+    // Floor compression for aerial view (0.7 = strong top-down)
+    const Y_COMPRESSION = 0.72;
+    // Wall height visual scale (kept moderate so walls don't dominate)
+    const Z_SCALE = 0.65;
+    const sx = x;
+    const sy = y * Y_COMPRESSION - z * Z_SCALE;
     return [sx, sy];
 }
 
@@ -1099,7 +1106,7 @@ function generateSVG(){
     }
     const bcx = (minX + maxX) / 2;
     const bcy = (minY + maxY) / 2;
-    const WALL_HEIGHT = 45;
+    const WALL_HEIGHT = 55;
     function toLocal(p){ return { x: p.x - bcx, y: p.y - bcy }; }
     function proj(x, y, z = 0){ return cabinetProject(x, y, z); }
 
@@ -1132,26 +1139,44 @@ function generateSVG(){
     svg += `<rect width="${svgW}" height="${svgH}" fill="#0a0a0d"/>`;
     svg += `<defs>`;
 
-    // Floor pattern - subtle grid for more horizontal cabinet projection
-    const tileSize = 45;
-    svg += `<pattern id="floorGrid" width="${tileSize}" height="${tileSize * SIN_SK * 1.5}" patternUnits="userSpaceOnUse">`;
-    svg += `<rect width="${tileSize}" height="${tileSize * SIN_SK * 1.5}" fill="#dcdce0"/>`;
-    svg += `<rect width="${tileSize}" height="${tileSize * SIN_SK * 1.5}" fill="none" stroke="#cfcfd3" stroke-width="0.5" opacity="0.7"/>`;
+    // === FLOOR PATTERN v24 - subtle grid with soft lighting ===
+    svg += `<pattern id="floorGrid" width="48" height="34" patternUnits="userSpaceOnUse">`;
+    svg += `<rect width="48" height="34" fill="#e2e2e6"/>`;
+    svg += `<path d="M 0 0 L 48 0 M 0 0 L 0 34" stroke="#c8c8cc" stroke-width="0.5" opacity="0.6"/>`;
     svg += `</pattern>`;
 
-    svg += `<linearGradient id="extSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#c8c8ce"/><stop offset="100%" stop-color="#929298"/></linearGradient>`;
-    svg += `<linearGradient id="extTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#e8e8ec"/><stop offset="100%" stop-color="#b8b8bc"/></linearGradient>`;
-    svg += `<linearGradient id="intSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#d4d4d8"/><stop offset="100%" stop-color="#a8a8ac"/></linearGradient>`;
-    svg += `<linearGradient id="intTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#ebebef"/><stop offset="100%" stop-color="#c4c4c8"/></linearGradient>`;
-    svg += `<linearGradient id="wallEnd" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#bababf"/><stop offset="100%" stop-color="#9b9ba0"/></linearGradient>`;
-    svg += `<linearGradient id="ductTop" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#ffffff"/><stop offset="100%" stop-color="#d8d8dc"/></linearGradient>`;
-    svg += `<linearGradient id="ductSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#c8c8cc"/><stop offset="100%" stop-color="#a0a0a4"/></linearGradient>`;
+    // Soft floor lighting gradient (lighter center, darker edges = ambient depth)
+    svg += `<radialGradient id="floorLight" cx="50%" cy="35%" r="65%">`;
+    svg += `<stop offset="0%" stop-color="#ffffff" stop-opacity="0.25"/>`;
+    svg += `<stop offset="100%" stop-color="#000000" stop-opacity="0.12"/>`;
+    svg += `</radialGradient>`;
+
+    // === WALL GRADIENTS v24 - darker outer, AO shading ===
+    svg += `<linearGradient id="extSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#b8b8be"/><stop offset="100%" stop-color="#7a7a80"/></linearGradient>`;
+    svg += `<linearGradient id="extTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#dcdce0"/><stop offset="100%" stop-color="#a8a8ac"/></linearGradient>`;
+    svg += `<linearGradient id="intSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#c8c8cc"/><stop offset="100%" stop-color="#9a9aa0"/></linearGradient>`;
+    svg += `<linearGradient id="intTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#e2e2e6"/><stop offset="100%" stop-color="#b8b8bc"/></linearGradient>`;
+    svg += `<linearGradient id="wallEnd" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#a8a8ad"/><stop offset="100%" stop-color="#86868c"/></linearGradient>`;
+
+    // === DUCT GRADIENTS v24 - cleaner white, more volumetric ===
+    svg += `<linearGradient id="ductTop" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#ffffff"/><stop offset="60%" stop-color="#f4f4f7"/><stop offset="100%" stop-color="#e0e0e4"/></linearGradient>`;
+    svg += `<linearGradient id="ductSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#d8d8dc"/><stop offset="100%" stop-color="#a4a4a8"/></linearGradient>`;
+
+    // Equipment gradients (unchanged - they already look good)
     svg += `<linearGradient id="vavTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3b6df0"/><stop offset="100%" stop-color="#1e40af"/></linearGradient>`;
     svg += `<linearGradient id="vavFront" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#1e3a8a"/><stop offset="100%" stop-color="#152a6e"/></linearGradient>`;
     svg += `<linearGradient id="vavRight" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#1e40af"/><stop offset="100%" stop-color="#0c1f5c"/></linearGradient>`;
     svg += `<linearGradient id="ahuTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#34d365"/><stop offset="100%" stop-color="#16a34a"/></linearGradient>`;
     svg += `<linearGradient id="ahuFront" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#15803d"/><stop offset="100%" stop-color="#0a5828"/></linearGradient>`;
     svg += `<linearGradient id="ahuRight" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#16a34a"/><stop offset="100%" stop-color="#0c5a26"/></linearGradient>`;
+
+    // Wall shadow filter for soft drop shadows on floor
+    svg += `<filter id="wallShadow" x="-20%" y="-20%" width="140%" height="140%">`;
+    svg += `<feGaussianBlur in="SourceAlpha" stdDeviation="3"/>`;
+    svg += `<feOffset dx="2" dy="3"/>`;
+    svg += `<feComponentTransfer><feFuncA type="linear" slope="0.35"/></feComponentTransfer>`;
+    svg += `<feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>`;
+    svg += `</filter>`;
     svg += `</defs>`;
 
     if(extWall){
@@ -1162,7 +1187,12 @@ function generateSVG(){
             path += (i === 0 ? 'M' : 'L') + sx + ',' + sy + ' ';
         }
         path += 'Z';
-        svg += `<path d="${path}" fill="url(#floorGrid)" stroke="#a0a0a4" stroke-width="0.4"/>`;
+        // Base floor grid
+        svg += `<path d="${path}" fill="url(#floorGrid)" stroke="#888" stroke-width="0.5"/>`;
+        // Soft lighting overlay
+        svg += `<path d="${path}" fill="url(#floorLight)"/>`;
+        // Ambient occlusion inner ring (subtle darker edge near walls)
+        svg += `<path d="${path}" fill="none" stroke="#5a5a60" stroke-width="2.5" opacity="0.25"/>`;
     }
 
     function drawThickWall(p1, p2, height, thickness, sideG, topG, stroke){
@@ -1192,10 +1222,10 @@ function generateSVG(){
     if(extWall && extWall.points.length >= 2){
         const pts = extWall.points.map(p => toLocal(p));
         for(let i = 0; i < pts.length - 1; i++){
-            svg += drawThickWall(pts[i], pts[i+1], WALL_HEIGHT, 14, 'url(#extSide)', 'url(#extTop)', '#5a5d63');
+            svg += drawThickWall(pts[i], pts[i+1], WALL_HEIGHT, 16, 'url(#extSide)', 'url(#extTop)', '#48484e');
         }
         if(pts.length >= 3){
-            svg += drawThickWall(pts[pts.length-1], pts[0], WALL_HEIGHT, 14, 'url(#extSide)', 'url(#extTop)', '#5a5d63');
+            svg += drawThickWall(pts[pts.length-1], pts[0], WALL_HEIGHT, 16, 'url(#extSide)', 'url(#extTop)', '#48484e');
         }
     }
 
@@ -1203,7 +1233,7 @@ function generateSVG(){
         if(el.type === 'intwall' && el.points && el.points.length >= 2){
             const pts = el.points.map(p => toLocal(p));
             for(let i = 0; i < pts.length - 1; i++){
-                svg += drawThickWall(pts[i], pts[i+1], WALL_HEIGHT * 0.92, 8, 'url(#intSide)', 'url(#intTop)', '#6a6d73');
+                svg += drawThickWall(pts[i], pts[i+1], WALL_HEIGHT * 0.88, 9, 'url(#intSide)', 'url(#intTop)', '#58585e');
             }
         }
     });
@@ -1216,14 +1246,15 @@ function generateSVG(){
             const dx = p2.x - p1.x, dy = p2.y - p1.y;
             const len = Math.sqrt(dx*dx + dy*dy);
             if(len < 1) continue;
-            const ductW = 13, ductH = 9;
+            // v24: more consistent thickness, slightly chunkier for visibility
+            const ductW = 16, ductH = 11;
             const nx = -dy / len * ductW / 2;
             const ny = dx / len * ductW / 2;
             const p1a = { x: p1.x + nx, y: p1.y + ny };
             const p1b = { x: p1.x - nx, y: p1.y - ny };
             const p2a = { x: p2.x + nx, y: p2.y + ny };
             const p2b = { x: p2.x - nx, y: p2.y - ny };
-            const zLevel = WALL_HEIGHT - 8;
+            const zLevel = WALL_HEIGHT - 10;
             const [t1ax, t1ay] = projSVG(p1a.x, p1a.y, zLevel + ductH);
             const [t2ax, t2ay] = projSVG(p2a.x, p2a.y, zLevel + ductH);
             const [t1bx, t1by] = projSVG(p1b.x, p1b.y, zLevel + ductH);
@@ -1232,10 +1263,19 @@ function generateSVG(){
             const [b2bx, b2by] = projSVG(p2b.x, p2b.y, zLevel);
             const [b1ax, b1ay] = projSVG(p1a.x, p1a.y, zLevel);
             const [b2ax, b2ay] = projSVG(p2a.x, p2a.y, zLevel);
-            svg += `<path d="M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="url(#ductTop)" stroke="#888" stroke-width="0.4"/>`;
-            svg += `<path d="M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="url(#ductSide)" stroke="#888" stroke-width="0.4"/>`;
-            svg += `<path d="M ${b1ax},${b1ay} L ${b1bx},${b1by} L ${t1bx},${t1by} L ${t1ax},${t1ay} Z" fill="#bababf" stroke="#888" stroke-width="0.4"/>`;
-            svg += `<path d="M ${b2ax},${b2ay} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t2ax},${t2ay} Z" fill="#bababf" stroke="#888" stroke-width="0.4"/>`;
+            // Soft shadow underneath
+            const [sh1ax, sh1ay] = projSVG(p1a.x + 2, p1a.y + 2, 0.5);
+            const [sh2ax, sh2ay] = projSVG(p2a.x + 2, p2a.y + 2, 0.5);
+            const [sh1bx, sh1by] = projSVG(p1b.x + 2, p1b.y + 2, 0.5);
+            const [sh2bx, sh2by] = projSVG(p2b.x + 2, p2b.y + 2, 0.5);
+            svg += `<path d="M ${sh1ax},${sh1ay} L ${sh2ax},${sh2ay} L ${sh2bx},${sh2by} L ${sh1bx},${sh1by} Z" fill="#000" opacity="0.18"/>`;
+            // Top face - cleaner white with subtle gradient
+            svg += `<path d="M ${t1ax},${t1ay} L ${t2ax},${t2ay} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="url(#ductTop)" stroke="#7a7a80" stroke-width="0.5"/>`;
+            // Front face
+            svg += `<path d="M ${b1bx},${b1by} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t1bx},${t1by} Z" fill="url(#ductSide)" stroke="#7a7a80" stroke-width="0.5"/>`;
+            // End caps
+            svg += `<path d="M ${b1ax},${b1ay} L ${b1bx},${b1by} L ${t1bx},${t1by} L ${t1ax},${t1ay} Z" fill="#a8a8ac" stroke="#7a7a80" stroke-width="0.5"/>`;
+            svg += `<path d="M ${b2ax},${b2ay} L ${b2bx},${b2by} L ${t2bx},${t2by} L ${t2ax},${t2ay} Z" fill="#a8a8ac" stroke="#7a7a80" stroke-width="0.5"/>`;
         }
     });
 
@@ -1283,14 +1323,14 @@ function generateSVG(){
     elements.forEach(el => {
         if(el.type === 'vav'){
             const p = toLocal({ x: el.x, y: el.y });
-            svg += drawCube(p.x, p.y, 8, 18, WALL_HEIGHT - 18, 'url(#vavTop)', 'url(#vavFront)', 'url(#vavRight)', '#0c1c5c');
+            svg += drawCube(p.x, p.y, 9, 20, WALL_HEIGHT - 20, 'url(#vavTop)', 'url(#vavFront)', 'url(#vavRight)', '#0c1c5c');
         }
     });
 
     elements.forEach(el => {
         if(el.type === 'ahu'){
             const p = toLocal({ x: el.x, y: el.y });
-            svg += drawCube(p.x, p.y, 18, 26, WALL_HEIGHT - 26, 'url(#ahuTop)', 'url(#ahuFront)', 'url(#ahuRight)', '#0a4220');
+            svg += drawCube(p.x, p.y, 22, 30, WALL_HEIGHT - 30, 'url(#ahuTop)', 'url(#ahuFront)', 'url(#ahuRight)', '#0a4220');
         }
     });
 
