@@ -38,7 +38,7 @@ def pdf_to_png(pdf_path, out_path):
 
 
 # ============================================================
-# SMART FLOORPLAN ISOLATION (v24 NEW)
+# SMART FLOORPLAN ISOLATION (v25 NEW)
 # ============================================================
 
 def smart_isolate_floorplan(img):
@@ -327,6 +327,59 @@ def build_exterior_polygon(footprint):
     ]
 
 
+def detect_doors_in_walls(lines, min_gap=20, max_gap=70):
+    """Detect doors as small gaps between collinear wall segments.
+    Returns list of door dicts with start/end points."""
+    doors = []
+    if not lines:
+        return doors
+
+    # Separate horizontal and vertical
+    horizontal = [l for l in lines if l[1] == l[3]]
+    vertical = [l for l in lines if l[0] == l[2]]
+
+    # For horizontal lines: find pairs with same Y and small X gap
+    horizontal.sort(key=lambda l: (l[1], l[0]))
+    for i in range(len(horizontal) - 1):
+        l1 = horizontal[i]
+        l2 = horizontal[i + 1]
+        # Same Y level (within 8px)
+        if abs(l1[1] - l2[1]) > 8:
+            continue
+        # Gap between end of l1 and start of l2
+        gap = l2[0] - l1[2]
+        if min_gap <= gap <= max_gap:
+            # This is likely a door
+            doors.append({
+                "type": "door",
+                "points": [
+                    {"x": int(l1[2]), "y": int((l1[1] + l2[1]) // 2)},
+                    {"x": int(l2[0]), "y": int((l1[1] + l2[1]) // 2)}
+                ],
+                "detected": True
+            })
+
+    # For vertical lines: find pairs with same X and small Y gap
+    vertical.sort(key=lambda l: (l[0], l[1]))
+    for i in range(len(vertical) - 1):
+        l1 = vertical[i]
+        l2 = vertical[i + 1]
+        if abs(l1[0] - l2[0]) > 8:
+            continue
+        gap = l2[1] - l1[3]
+        if min_gap <= gap <= max_gap:
+            doors.append({
+                "type": "door",
+                "points": [
+                    {"x": int((l1[0] + l2[0]) // 2), "y": int(l1[3])},
+                    {"x": int((l1[0] + l2[0]) // 2), "y": int(l2[1])}
+                ],
+                "detected": True
+            })
+
+    return doors
+
+
 def detect_architecture(image_path):
     """Main detection pipeline with smart floorplan isolation."""
     img = cv2.imread(image_path)
@@ -396,6 +449,10 @@ def detect_architecture(image_path):
             "detected": True
         })
 
+    # Step 10 (v25): Detect doors as gaps in collinear walls
+    doors = detect_doors_in_walls(merged)
+    elements.extend(doors)
+
     return {
         "image_width": img_w,
         "image_height": img_h,
@@ -405,6 +462,7 @@ def detect_architecture(image_path):
             "lines_merged": len(merged),
             "exterior": len(exterior_lines),
             "interior": len(interior_lines),
+            "doors": len(doors),
             "crop": crop_box
         }
     }
@@ -498,7 +556,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 </style></head><body>
 <div class="card">
 <div class="logo">&#128274;</div>
-<h1>BAS Generator v24</h1>
+<h1>BAS Generator v25</h1>
 <p class="sub">Private Access</p>
 <form method="POST" action="/login">
 <input type="password" name="password" placeholder="Enter password" required autofocus>
@@ -510,7 +568,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 
 
 HOME_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Generator v24</title>
+<html><head><title>BAS Generator v25</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
@@ -538,11 +596,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v24 <span class="badge">AERIAL RENDER</span></h1>
+<h1>BAS Generator v25 <span class="badge">SMART CORRECTION</span></h1>
 <p class="sub">Auto-detect building floorplan + HVAC</p>
 
 <div class="tip">
-<b>v24 NEW:</b> Top-down aerial cabinet projection - more like Tracer Synchrony graphics.
+<b>v25 NEW:</b> Door detection + Rectangle Eraser + Snap Walls + Clear Detected. Faster cleanup workflow!
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -592,7 +650,7 @@ function setMode(mode){
 
 
 EDITOR_PAGE = '''<!DOCTYPE html>
-<html><head><title>CAD Editor v24</title>
+<html><head><title>CAD Editor v25</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:8px;height:100vh;display:flex;flex-direction:column;overflow:hidden;}
@@ -612,6 +670,8 @@ canvas{display:block;}
 .btn-red{background:#dc2626;color:white;}
 .btn-gray{background:#333;color:white;}
 .btn-purple{background:#9333ea;color:white;}
+.btn-orange{background:#ea580c;color:white;}
+.btn-blue{background:#2563eb;color:white;}
 .spinner{display:inline-block;width:20px;height:20px;border:3px solid #fff;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
 .loading-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.85);display:none;align-items:center;justify-content:center;z-index:100;flex-direction:column;gap:16px;}
@@ -627,10 +687,12 @@ canvas{display:block;}
 {% endif %}
 
 <div class="topbar">
-<h1>CAD Editor v24</h1>
+<h1>CAD Editor v25</h1>
 <div style="display:flex;gap:6px;">
 <button onclick="undo()" class="action-btn btn-gray">&#8617; Undo</button>
-<button onclick="clearAll()" class="action-btn btn-red">Clear</button>
+<button onclick="clearDetectedOnly()" class="action-btn btn-orange">Clear Detected</button>
+<button onclick="snapWalls()" class="action-btn btn-blue">Snap Walls</button>
+<button onclick="clearAll()" class="action-btn btn-red">Clear All</button>
 <button onclick="autoBranchDiffusers()" class="action-btn btn-purple">Auto-Connect Diffusers</button>
 <button onclick="generate()" class="action-btn btn-green">Generate &rarr;</button>
 </div>
@@ -663,6 +725,10 @@ canvas{display:block;}
 
 <button class="tool-btn" data-tool="move" onclick="selectTool(this)">&#9874; Move</button>
 <button class="tool-btn" data-tool="delete" onclick="selectTool(this)">&#128465; Delete</button>
+<button class="tool-btn" data-tool="door" onclick="selectTool(this)">
+<div class="color-swatch" style="background:#facc15"></div> Door
+</button>
+<button class="tool-btn" data-tool="erase_rect" onclick="selectTool(this)">&#9633; Box Erase</button>
 
 <div class="divider"></div>
 
@@ -697,10 +763,16 @@ let currentPolyline = null;
 let hoverPoint = null;
 let selectedElement = null;
 let dragOffset = null;
+// v25: Rectangle eraser state
+let eraseRectStart = null;
+let eraseRectCurrent = null;
+// v25: Door state (2-click line)
+let doorFirstPoint = null;
 
 const COLORS = {
     extwall:'#9333ea', intwall:'#ea580c', duct:'#dcdce0',
-    vav:'#1e40af', ahu:'#16a34a', diffuser:'#ffffff'
+    vav:'#1e40af', ahu:'#16a34a', diffuser:'#ffffff',
+    door:'#facc15'
 };
 
 const STATUS_TEXTS = {
@@ -711,7 +783,9 @@ const STATUS_TEXTS = {
     ahu:'Click to place the AHU.',
     diffuser:'Click to place a diffuser.',
     move:'Click and drag any element to move it.',
-    delete:'Click any element to delete it.'
+    delete:'Click any element to delete it.',
+    door:'Click TWO points for a door opening on a wall.',
+    erase_rect:'Click & drag to draw a rectangle - everything inside gets deleted.'
 };
 
 const img = new Image();
@@ -736,6 +810,10 @@ function selectTool(btn){
         currentPolyline = null;
         saveState();
     }
+    // v25: Reset new tool states
+    eraseRectStart = null;
+    eraseRectCurrent = null;
+    doorFirstPoint = null;
     drawCanvas.className = '';
     if(currentTool === 'move') drawCanvas.classList.add('cursor-move');
     else drawCanvas.classList.add('cursor-cross');
@@ -780,6 +858,20 @@ drawCanvas.addEventListener('click', function(e){
         }
         redraw(); return;
     }
+    // v25: Door tool (2 clicks)
+    if(currentTool === 'door'){
+        if(!doorFirstPoint){
+            doorFirstPoint = { x: pos.x, y: pos.y };
+        } else {
+            elements.push({
+                type: 'door',
+                points: [doorFirstPoint, { x: pos.x, y: pos.y }]
+            });
+            doorFirstPoint = null;
+            saveState();
+        }
+        redraw(); return;
+    }
 });
 
 drawCanvas.addEventListener('dblclick', function(e){
@@ -804,12 +896,24 @@ drawCanvas.addEventListener('mousemove', function(e){
         redraw();
         return;
     }
-    if(currentPolyline) redraw();
+    // v25: Rectangle eraser drag preview
+    if(currentTool === 'erase_rect' && eraseRectStart){
+        eraseRectCurrent = pos;
+        redraw();
+        return;
+    }
+    if(currentPolyline || doorFirstPoint) redraw();
 });
 
 drawCanvas.addEventListener('mousedown', function(e){
-    if(currentTool !== 'move') return;
     const pos = getMousePos(e);
+    // v25: Rectangle eraser start
+    if(currentTool === 'erase_rect'){
+        eraseRectStart = pos;
+        eraseRectCurrent = pos;
+        return;
+    }
+    if(currentTool !== 'move') return;
     const idx = findElementAt(pos);
     if(idx !== -1){
         selectedElement = elements[idx];
@@ -818,12 +922,43 @@ drawCanvas.addEventListener('mousedown', function(e){
     }
 });
 
-drawCanvas.addEventListener('mouseup', function(){
+drawCanvas.addEventListener('mouseup', function(e){
+    // v25: Rectangle eraser apply
+    if(currentTool === 'erase_rect' && eraseRectStart && eraseRectCurrent){
+        const rx1 = Math.min(eraseRectStart.x, eraseRectCurrent.x);
+        const ry1 = Math.min(eraseRectStart.y, eraseRectCurrent.y);
+        const rx2 = Math.max(eraseRectStart.x, eraseRectCurrent.x);
+        const ry2 = Math.max(eraseRectStart.y, eraseRectCurrent.y);
+        const before = elements.length;
+        elements = elements.filter(el => !elementIntersectsRect(el, rx1, ry1, rx2, ry2));
+        eraseRectStart = null;
+        eraseRectCurrent = null;
+        if(elements.length !== before) saveState();
+        redraw();
+        return;
+    }
     if(selectedElement){ saveState(); selectedElement = null; dragOffset = null; }
 });
 
+function elementIntersectsRect(el, x1, y1, x2, y2){
+    function pointIn(p){ return p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2; }
+    if(el.type === 'vav' || el.type === 'ahu' || el.type === 'diffuser'){
+        return pointIn({ x: el.x, y: el.y });
+    }
+    if(el.points){
+        for(const p of el.points){
+            if(pointIn(p)) return true;
+        }
+    }
+    return false;
+}
+
 document.addEventListener('keydown', function(e){
-    if(e.key === 'Escape' && currentPolyline){ currentPolyline = null; redraw(); }
+    if(e.key === 'Escape'){
+        if(currentPolyline){ currentPolyline = null; redraw(); }
+        if(doorFirstPoint){ doorFirstPoint = null; redraw(); }
+        if(eraseRectStart){ eraseRectStart = null; eraseRectCurrent = null; redraw(); }
+    }
 });
 
 function findElementAt(pos){
@@ -907,6 +1042,35 @@ function redraw(){
             drawCtx.setLineDash([]);
         }
     }
+    // v25: Door preview after first click
+    if(doorFirstPoint && hoverPoint){
+        drawCtx.fillStyle = '#facc15';
+        drawCtx.beginPath();
+        drawCtx.arc(doorFirstPoint.x, doorFirstPoint.y, 5, 0, Math.PI * 2);
+        drawCtx.fill();
+        drawCtx.strokeStyle = '#facc15';
+        drawCtx.lineWidth = 4;
+        drawCtx.setLineDash([6, 4]);
+        drawCtx.beginPath();
+        drawCtx.moveTo(doorFirstPoint.x, doorFirstPoint.y);
+        drawCtx.lineTo(hoverPoint.x, hoverPoint.y);
+        drawCtx.stroke();
+        drawCtx.setLineDash([]);
+    }
+    // v25: Rectangle eraser preview
+    if(eraseRectStart && eraseRectCurrent){
+        const x = Math.min(eraseRectStart.x, eraseRectCurrent.x);
+        const y = Math.min(eraseRectStart.y, eraseRectCurrent.y);
+        const w = Math.abs(eraseRectCurrent.x - eraseRectStart.x);
+        const h = Math.abs(eraseRectCurrent.y - eraseRectStart.y);
+        drawCtx.fillStyle = 'rgba(220, 38, 38, 0.2)';
+        drawCtx.fillRect(x, y, w, h);
+        drawCtx.strokeStyle = '#dc2626';
+        drawCtx.lineWidth = 2;
+        drawCtx.setLineDash([8, 4]);
+        drawCtx.strokeRect(x, y, w, h);
+        drawCtx.setLineDash([]);
+    }
 }
 
 function drawElement(el, inProgress = false){
@@ -949,6 +1113,27 @@ function drawElement(el, inProgress = false){
         drawCtx.lineTo(el.points[1].x, el.points[1].y);
         drawCtx.stroke();
         drawCtx.setLineDash([]);
+        return;
+    }
+    // v25: Door rendering
+    if(el.type === 'door'){
+        if(!el.points || el.points.length < 2) return;
+        drawCtx.strokeStyle = '#facc15';
+        drawCtx.lineWidth = 6;
+        drawCtx.lineCap = 'round';
+        drawCtx.globalAlpha = el.detected ? 0.8 : 1.0;
+        drawCtx.beginPath();
+        drawCtx.moveTo(el.points[0].x, el.points[0].y);
+        drawCtx.lineTo(el.points[1].x, el.points[1].y);
+        drawCtx.stroke();
+        drawCtx.globalAlpha = 1.0;
+        // Yellow endpoint dots
+        drawCtx.fillStyle = '#facc15';
+        for(const p of el.points){
+            drawCtx.beginPath();
+            drawCtx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+            drawCtx.fill();
+        }
         return;
     }
     if(!el.points || el.points.length === 0) return;
@@ -1004,6 +1189,84 @@ function clearAll(){
     redraw();
 }
 
+// v25: Clear only auto-detected elements (keep what user drew manually)
+function clearDetectedOnly(){
+    const before = elements.length;
+    elements = elements.filter(el => !el.detected);
+    const removed = before - elements.length;
+    if(removed === 0){
+        alert('No auto-detected elements to clear.');
+        return;
+    }
+    saveState();
+    redraw();
+}
+
+// v25: Snap walls - align almost-straight walls to perfect H/V and merge close ones
+function snapWalls(){
+    const SNAP_ANGLE_DEG = 8;
+    const MERGE_DIST = 12;
+    let changes = 0;
+
+    // Step 1: Snap each wall segment to H or V if close
+    elements.forEach(el => {
+        if((el.type === 'extwall' || el.type === 'intwall') && el.points && el.points.length >= 2){
+            for(let i = 0; i < el.points.length - 1; i++){
+                const p1 = el.points[i];
+                const p2 = el.points[i+1];
+                const dx = p2.x - p1.x;
+                const dy = p2.y - p1.y;
+                if(Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+                let angle = Math.atan2(dy, dx) * 180 / Math.PI;
+                if(angle < 0) angle += 180;
+                if(angle < SNAP_ANGLE_DEG || angle > 180 - SNAP_ANGLE_DEG){
+                    // Snap to horizontal
+                    const yAvg = (p1.y + p2.y) / 2;
+                    p1.y = yAvg; p2.y = yAvg;
+                    changes++;
+                } else if(Math.abs(angle - 90) < SNAP_ANGLE_DEG){
+                    // Snap to vertical
+                    const xAvg = (p1.x + p2.x) / 2;
+                    p1.x = xAvg; p2.x = xAvg;
+                    changes++;
+                }
+            }
+        }
+    });
+
+    // Step 2: Snap close endpoints together
+    const allPoints = [];
+    elements.forEach((el, ei) => {
+        if(el.points){
+            el.points.forEach((p, pi) => {
+                allPoints.push({ p, ei, pi });
+            });
+        }
+    });
+    for(let i = 0; i < allPoints.length; i++){
+        for(let j = i+1; j < allPoints.length; j++){
+            const a = allPoints[i].p;
+            const b = allPoints[j].p;
+            const d = Math.hypot(a.x - b.x, a.y - b.y);
+            if(d > 0 && d < MERGE_DIST){
+                const mx = (a.x + b.x) / 2;
+                const my = (a.y + b.y) / 2;
+                a.x = mx; a.y = my;
+                b.x = mx; b.y = my;
+                changes++;
+            }
+        }
+    }
+
+    if(changes === 0){
+        alert('No walls needed snapping.');
+        return;
+    }
+    saveState();
+    redraw();
+    document.getElementById('statusBar').textContent = `Snapped ${changes} segments/endpoints.`;
+}
+
 async function generate(){
     if(currentPolyline && currentPolyline.points && currentPolyline.points.length >= 2){
         elements.push(currentPolyline);
@@ -1033,7 +1296,7 @@ async function generate(){
 
 
 RESULT_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Graphic v24</title>
+<html><head><title>BAS Graphic v25</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:12px;}
@@ -1051,7 +1314,7 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 .btn-gray{background:#252a38;color:#aab0c4;}
 .footer{text-align:center;color:#3a4060;font-size:11px;margin-top:10px;}
 </style></head><body>
-<h1>Synchrony BAS Graphic v24</h1>
+<h1>Synchrony BAS Graphic v25</h1>
 <p class="sub">Top-down aerial projection - Ready for Tracer Synchrony / Niagara</p>
 <div class="stats">
 <div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
@@ -1059,6 +1322,7 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 <div class="stat">Ducts: <b>{{ n_ducts }}</b></div>
 <div class="stat">Diffusers: <b>{{ n_diffs }}</b></div>
 <div class="stat">Walls: <b>{{ n_walls }}</b></div>
+<div class="stat">Doors: <b>{{ n_doors }}</b></div>
 </div>
 <div class="viewer-svg" id="svgViewer"></div>
 <div class="actions">
@@ -1072,7 +1336,7 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 <script>
 const data = {{ detection_json | safe }};
 
-// === TOP-DOWN AERIAL CABINET PROJECTION (v24) ===
+// === TOP-DOWN AERIAL CABINET PROJECTION (v25) ===
 // True cabinet projection from above: floor compressed Y but kept large,
 // walls extruded vertically with subtle perspective.
 // Much more "looking down at the building" feel.
@@ -1139,7 +1403,7 @@ function generateSVG(){
     svg += `<rect width="${svgW}" height="${svgH}" fill="#0a0a0d"/>`;
     svg += `<defs>`;
 
-    // === FLOOR PATTERN v24 - subtle grid with soft lighting ===
+    // === FLOOR PATTERN v25 - subtle grid with soft lighting ===
     svg += `<pattern id="floorGrid" width="48" height="34" patternUnits="userSpaceOnUse">`;
     svg += `<rect width="48" height="34" fill="#e2e2e6"/>`;
     svg += `<path d="M 0 0 L 48 0 M 0 0 L 0 34" stroke="#c8c8cc" stroke-width="0.5" opacity="0.6"/>`;
@@ -1151,14 +1415,14 @@ function generateSVG(){
     svg += `<stop offset="100%" stop-color="#000000" stop-opacity="0.12"/>`;
     svg += `</radialGradient>`;
 
-    // === WALL GRADIENTS v24 - darker outer, AO shading ===
+    // === WALL GRADIENTS v25 - darker outer, AO shading ===
     svg += `<linearGradient id="extSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#b8b8be"/><stop offset="100%" stop-color="#7a7a80"/></linearGradient>`;
     svg += `<linearGradient id="extTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#dcdce0"/><stop offset="100%" stop-color="#a8a8ac"/></linearGradient>`;
     svg += `<linearGradient id="intSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#c8c8cc"/><stop offset="100%" stop-color="#9a9aa0"/></linearGradient>`;
     svg += `<linearGradient id="intTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#e2e2e6"/><stop offset="100%" stop-color="#b8b8bc"/></linearGradient>`;
     svg += `<linearGradient id="wallEnd" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#a8a8ad"/><stop offset="100%" stop-color="#86868c"/></linearGradient>`;
 
-    // === DUCT GRADIENTS v24 - cleaner white, more volumetric ===
+    // === DUCT GRADIENTS v25 - cleaner white, more volumetric ===
     svg += `<linearGradient id="ductTop" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#ffffff"/><stop offset="60%" stop-color="#f4f4f7"/><stop offset="100%" stop-color="#e0e0e4"/></linearGradient>`;
     svg += `<linearGradient id="ductSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#d8d8dc"/><stop offset="100%" stop-color="#a4a4a8"/></linearGradient>`;
 
@@ -1238,6 +1502,32 @@ function generateSVG(){
         }
     });
 
+    // v25: Render doors as short low walls (visible opening)
+    elements.forEach(el => {
+        if(el.type === 'door' && el.points && el.points.length === 2){
+            const p1 = toLocal(el.points[0]);
+            const p2 = toLocal(el.points[1]);
+            // Draw a low door frame (half wall height = visible opening)
+            const dx = p2.x - p1.x;
+            const dy = p2.y - p1.y;
+            const len = Math.sqrt(dx*dx + dy*dy);
+            if(len < 1) return;
+            const thickness = 9;
+            const nx = -dy / len * thickness / 2;
+            const ny = dx / len * thickness / 2;
+            const p1a = { x: p1.x + nx, y: p1.y + ny };
+            const p1b = { x: p1.x - nx, y: p1.y - ny };
+            const p2b = { x: p2.x - nx, y: p2.y - ny };
+            // Floor-level door threshold (visible as small rectangle on floor)
+            const [b1a] = [projSVG(p1a.x, p1a.y, 0)];
+            const [b1b] = [projSVG(p1b.x, p1b.y, 0)];
+            const [b2a] = [projSVG(p2.x + nx, p2.y + ny, 0)];
+            const [b2b] = [projSVG(p2b.x, p2b.y, 0)];
+            // Door floor marker (slightly raised, distinct color)
+            svg += `<path d="M ${b1a[0]},${b1a[1]} L ${b2a[0]},${b2a[1]} L ${b2b[0]},${b2b[1]} L ${b1b[0]},${b1b[1]} Z" fill="#e8e0c8" stroke="#a89860" stroke-width="0.6"/>`;
+        }
+    });
+
     const ductElements = elements.filter(e => e.type === 'duct' && e.points && e.points.length >= 2);
     ductElements.forEach(el => {
         const pts = el.points.map(p => toLocal(p));
@@ -1246,7 +1536,7 @@ function generateSVG(){
             const dx = p2.x - p1.x, dy = p2.y - p1.y;
             const len = Math.sqrt(dx*dx + dy*dy);
             if(len < 1) continue;
-            // v24: more consistent thickness, slightly chunkier for visibility
+            // v25: more consistent thickness, slightly chunkier for visibility
             const ductW = 16, ductH = 11;
             const nx = -dy / len * ductW / 2;
             const ny = dx / len * ductW / 2;
@@ -1455,7 +1745,7 @@ def upload():
                 stats = result["stats"]
                 n_walls = sum(1 for e in initial_elements if e.get("type") in ("extwall", "intwall"))
                 crop = stats.get("crop", (0, 0, 0, 0))
-                detected_message = f"Smart isolation: cropped to {crop[2]}x{crop[3]}. Detected {n_walls} walls from {stats['lines_raw']} raw lines. Review and adjust!"
+                detected_message = f"Smart isolation: cropped to {crop[2]}x{crop[3]}. Detected {n_walls} walls + {stats.get('doors', 0)} doors from {stats['lines_raw']} raw lines. Review and adjust!"
             else:
                 detected_message = "Detection ran but found nothing. Try Manual mode."
         except Exception as e:
@@ -1521,12 +1811,13 @@ def result():
     n_ducts = sum(1 for e in elements if e.get("type") == "duct")
     n_diffs = sum(1 for e in elements if e.get("type") == "diffuser")
     n_walls = sum(1 for e in elements if e.get("type") in ("extwall", "intwall"))
+    n_doors = sum(1 for e in elements if e.get("type") == "door")
 
     return render_template_string(
         RESULT_PAGE,
         detection_json=json.dumps(detection),
         n_vavs=n_vavs, n_ahus=n_ahus, n_ducts=n_ducts,
-        n_diffs=n_diffs, n_walls=n_walls
+        n_diffs=n_diffs, n_walls=n_walls, n_doors=n_doors
     )
 
 
