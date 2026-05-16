@@ -18,6 +18,7 @@ OUTPUT_FOLDER = "outputs"
 UPLOAD_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_upload.png")
 UPLOAD_PDF_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_upload.pdf")
 CLEAN_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_clean.png")
+ISOLATED_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_isolated.png")
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -37,47 +38,118 @@ def pdf_to_png(pdf_path, out_path):
 
 
 # ============================================================
-# ARCHITECTURE DETECTION ENGINE
+# SMART FLOORPLAN ISOLATION (v23.5 NEW)
+# ============================================================
+
+def smart_isolate_floorplan(img):
+    """Detect and crop ONLY the building floorplan area, ignoring title blocks,
+    tables, legends, logos, etc. Returns isolated image and crop bounds."""
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Step 1: Binary threshold to get all dark content
+    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+    # Step 2: Heavy dilation to create blobs of related content
+    # Title blocks, tables, and the floorplan each become separate blobs
+    kernel = np.ones((25, 25), np.uint8)
+    dilated = cv2.dilate(binary, kernel, iterations=3)
+
+    # Step 3: Find connected components (each blob = one region of content)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dilated, connectivity=8)
+
+    # Step 4: Filter regions - we want the BIGGEST connected blob that's
+    # NOT touching the page border (excludes the full page outline)
+    candidates = []
+    border_margin = 20
+    for i in range(1, num_labels):
+        x, y, ww, hh, area = stats[i]
+        # Skip very small regions
+        if area < (w * h * 0.05):
+            continue
+        # Calculate how "filled" the region is (density)
+        density = area / max(ww * hh, 1)
+
+        # Aspect ratio - floorplans are usually wider than tall, or roughly square
+        aspect = ww / max(hh, 1)
+
+        # Position score - floorplans are usually in the upper-left or center
+        # Title blocks/legends are usually on right/bottom edges
+        is_right_edge = (x + ww) > (w - border_margin * 5) and x > w * 0.6
+        is_bottom_edge = (y + hh) > (h - border_margin * 5) and y > h * 0.7
+
+        # Skip narrow strips (title blocks are usually tall and thin or wide and short)
+        if aspect < 0.3 or aspect > 8:
+            continue
+
+        # Skip regions clearly in corner positions where title blocks live
+        if is_right_edge and ww < w * 0.3:
+            continue
+        if is_bottom_edge and hh < h * 0.25:
+            continue
+
+        candidates.append({
+            "x": x, "y": y, "w": ww, "h": hh,
+            "area": area, "density": density,
+            "aspect": aspect
+        })
+
+    if not candidates:
+        # Fallback: use the full image
+        return img, (0, 0, w, h)
+
+    # Step 5: Pick the largest valid candidate (this is our floorplan)
+    candidates.sort(key=lambda c: -c["area"])
+    best = candidates[0]
+
+    # Step 6: Crop with small padding
+    pad = 20
+    x = max(0, best["x"] - pad)
+    y = max(0, best["y"] - pad)
+    x2 = min(w, best["x"] + best["w"] + pad)
+    y2 = min(h, best["y"] + best["h"] + pad)
+
+    cropped = img[y:y2, x:x2]
+
+    return cropped, (x, y, x2 - x, y2 - y)
+
+
+# ============================================================
+# ARCHITECTURE DETECTION ENGINE (improved)
 # ============================================================
 
 def remove_text_from_plan(img_gray):
     """Remove text and small annotations using connected components filter."""
-    # Threshold
     _, binary = cv2.threshold(img_gray, 200, 255, cv2.THRESH_BINARY_INV)
 
-    # Find connected components
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
 
-    # Create mask keeping only large/elongated components (walls, not text)
     cleaned = np.zeros_like(binary)
     for i in range(1, num_labels):
         x, y, w, h, area = stats[i]
         aspect = max(w, h) / max(min(w, h), 1)
-
-        # Keep if: very long (likely wall) OR very large area (likely wall)
-        if (aspect > 4 and area > 80) or (area > 500 and max(w, h) > 40):
+        # Keep only LONG lines or LARGE rectangles (walls), reject text/symbols
+        if (aspect > 5 and area > 100) or (area > 800 and max(w, h) > 60):
             cleaned[labels == i] = 255
 
     return cleaned
 
 
-def detect_walls_hough(binary_clean, min_line_length=50, max_line_gap=15):
+def detect_walls_hough(binary_clean, min_line_length=60, max_line_gap=15):
     """Detect straight wall lines using Hough Transform."""
-    # Apply morphology to connect broken lines
-    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
-    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
+    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
+    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 20))
 
     horizontal = cv2.morphologyEx(binary_clean, cv2.MORPH_OPEN, kernel_h, iterations=1)
     vertical = cv2.morphologyEx(binary_clean, cv2.MORPH_OPEN, kernel_v, iterations=1)
 
     combined = cv2.bitwise_or(horizontal, vertical)
 
-    # Hough Lines Probabilistic
     lines = cv2.HoughLinesP(
         combined,
         rho=1,
         theta=np.pi / 180,
-        threshold=80,
+        threshold=100,
         minLineLength=min_line_length,
         maxLineGap=max_line_gap
     )
@@ -86,11 +158,9 @@ def detect_walls_hough(binary_clean, min_line_length=50, max_line_gap=15):
 
 
 def snap_to_orthogonal(lines, angle_tolerance=5):
-    """Snap lines to perfectly horizontal or vertical (0 or 90 degrees).
-    Accepts Hough output (N, 1, 4) or list of [x1,y1,x2,y2]."""
+    """Snap lines to perfectly horizontal or vertical."""
     snapped = []
     for line in lines:
-        # Handle both Hough format [[x1,y1,x2,y2]] and flat [x1,y1,x2,y2]
         try:
             if hasattr(line, '__len__') and len(line) == 4:
                 x1, y1, x2, y2 = line
@@ -112,65 +182,66 @@ def snap_to_orthogonal(lines, angle_tolerance=5):
             angle += 180
 
         if angle < angle_tolerance or angle > 180 - angle_tolerance:
-            # Horizontal
             y_avg = (y1 + y2) // 2
             snapped.append([min(x1, x2), y_avg, max(x1, x2), y_avg])
         elif abs(angle - 90) < angle_tolerance:
-            # Vertical
             x_avg = (x1 + x2) // 2
             snapped.append([x_avg, min(y1, y2), x_avg, max(y1, y2)])
 
     return snapped
 
 
-def merge_collinear_lines(lines, distance_threshold=10):
+def merge_collinear_lines(lines, distance_threshold=12):
     """Merge lines that are collinear and close to each other."""
     if not lines:
         return []
 
-    horizontal = [l for l in lines if l[1] == l[3]]  # y1 == y2
-    vertical = [l for l in lines if l[0] == l[2]]    # x1 == x2
+    horizontal = [l for l in lines if l[1] == l[3]]
+    vertical = [l for l in lines if l[0] == l[2]]
 
     merged = []
 
-    # Group horizontal lines by similar Y coordinate
+    # Group horizontal lines
     horizontal.sort(key=lambda l: (l[1], l[0]))
     h_groups = []
     for line in horizontal:
         added = False
         for group in h_groups:
             if abs(line[1] - group[0][1]) < distance_threshold:
-                group.append(line)
-                added = True
-                break
+                # Also check if x ranges overlap or are close
+                gx_min = min(l[0] for l in group)
+                gx_max = max(l[2] for l in group)
+                if line[0] < gx_max + 50 and line[2] > gx_min - 50:
+                    group.append(line)
+                    added = True
+                    break
         if not added:
             h_groups.append([line])
 
-    # Merge each group
     for group in h_groups:
         y_avg = sum(l[1] for l in group) // len(group)
-        # Find continuous segments
-        group.sort(key=lambda l: l[0])
         x_min = min(l[0] for l in group)
         x_max = max(l[2] for l in group)
         merged.append([x_min, y_avg, x_max, y_avg])
 
-    # Group vertical lines by similar X coordinate
+    # Group vertical lines
     vertical.sort(key=lambda l: (l[0], l[1]))
     v_groups = []
     for line in vertical:
         added = False
         for group in v_groups:
             if abs(line[0] - group[0][0]) < distance_threshold:
-                group.append(line)
-                added = True
-                break
+                gy_min = min(l[1] for l in group)
+                gy_max = max(l[3] for l in group)
+                if line[1] < gy_max + 50 and line[3] > gy_min - 50:
+                    group.append(line)
+                    added = True
+                    break
         if not added:
             v_groups.append([line])
 
     for group in v_groups:
         x_avg = sum(l[0] for l in group) // len(group)
-        group.sort(key=lambda l: l[1])
         y_min = min(l[1] for l in group)
         y_max = max(l[3] for l in group)
         merged.append([x_avg, y_min, x_avg, y_max])
@@ -178,37 +249,65 @@ def merge_collinear_lines(lines, distance_threshold=10):
     return merged
 
 
-def classify_exterior_vs_interior(lines, img_shape):
-    """Identify which lines form the exterior perimeter vs interior walls."""
+def find_building_footprint(lines, img_shape):
+    """Find the tight bounding box of the actual walls (not page borders)."""
+    if not lines:
+        return None
+
     h, w = img_shape[:2]
 
-    if not lines:
+    # Filter out lines that are too close to image edges (likely page borders)
+    edge_margin = 15
+    valid_lines = []
+    for l in lines:
+        x1, y1, x2, y2 = l
+        # Reject if line is on the very edge of the image
+        if (x1 < edge_margin and x2 < edge_margin) or \
+           (x1 > w - edge_margin and x2 > w - edge_margin) or \
+           (y1 < edge_margin and y2 < edge_margin) or \
+           (y1 > h - edge_margin and y2 > h - edge_margin):
+            continue
+        valid_lines.append(l)
+
+    if not valid_lines:
+        valid_lines = lines
+
+    # Find tight bounding box
+    all_x = [l[0] for l in valid_lines] + [l[2] for l in valid_lines]
+    all_y = [l[1] for l in valid_lines] + [l[3] for l in valid_lines]
+
+    return {
+        "min_x": min(all_x),
+        "max_x": max(all_x),
+        "min_y": min(all_y),
+        "max_y": max(all_y)
+    }
+
+
+def classify_exterior_vs_interior(lines, footprint):
+    """Identify which lines form the exterior perimeter vs interior walls."""
+    if not lines or not footprint:
         return [], []
 
-    # Find the bounding box of all lines (potential building perimeter)
-    all_x = [l[0] for l in lines] + [l[2] for l in lines]
-    all_y = [l[1] for l in lines] + [l[3] for l in lines]
-    min_x, max_x = min(all_x), max(all_x)
-    min_y, max_y = min(all_y), max(all_y)
+    edge_tolerance = 30
 
-    # Lines close to the bounding box are likely exterior
-    edge_tolerance = 50
     exterior_lines = []
     interior_lines = []
 
     for line in lines:
         x1, y1, x2, y2 = line
-        # Check if line is near any edge of bounding box
-        near_edge = (
-            min(y1, y2) < min_y + edge_tolerance or  # near top
-            max(y1, y2) > max_y - edge_tolerance or  # near bottom
-            min(x1, x2) < min_x + edge_tolerance or  # near left
-            max(x1, x2) > max_x - edge_tolerance     # near right
-        )
-        # Long lines are more likely exterior
+
+        # Check if line is near the footprint boundary
+        near_top = max(y1, y2) < footprint["min_y"] + edge_tolerance
+        near_bottom = min(y1, y2) > footprint["max_y"] - edge_tolerance
+        near_left = max(x1, x2) < footprint["min_x"] + edge_tolerance
+        near_right = min(x1, x2) > footprint["max_x"] - edge_tolerance
+
+        near_edge = near_top or near_bottom or near_left or near_right
+
         length = math.hypot(x2 - x1, y2 - y1)
 
-        if near_edge and length > 100:
+        if near_edge and length > 80:
             exterior_lines.append(line)
         else:
             interior_lines.append(line)
@@ -216,51 +315,36 @@ def classify_exterior_vs_interior(lines, img_shape):
     return exterior_lines, interior_lines
 
 
-def build_exterior_polygon(exterior_lines):
-    """Construct a closed polygon from exterior lines."""
-    if not exterior_lines:
+def build_exterior_polygon(footprint):
+    """Construct a closed polygon from the footprint bounds."""
+    if not footprint:
         return None
-
-    # Get bounding box and use as fallback simple rectangle
-    all_x = [l[0] for l in exterior_lines] + [l[2] for l in exterior_lines]
-    all_y = [l[1] for l in exterior_lines] + [l[3] for l in exterior_lines]
-    min_x, max_x = min(all_x), max(all_x)
-    min_y, max_y = min(all_y), max(all_y)
-
-    # Simple rectangle perimeter (we can improve later)
     return [
-        {"x": int(min_x), "y": int(min_y)},
-        {"x": int(max_x), "y": int(min_y)},
-        {"x": int(max_x), "y": int(max_y)},
-        {"x": int(min_x), "y": int(max_y)}
+        {"x": int(footprint["min_x"]), "y": int(footprint["min_y"])},
+        {"x": int(footprint["max_x"]), "y": int(footprint["min_y"])},
+        {"x": int(footprint["max_x"]), "y": int(footprint["max_y"])},
+        {"x": int(footprint["min_x"]), "y": int(footprint["max_y"])}
     ]
 
 
-def detect_doors(interior_lines, all_lines, gap_min=20, gap_max=60):
-    """Detect doors as gaps in walls."""
-    doors = []
-    # For each interior wall, check if it has small gaps that could be doors
-    # This is a simplified version - real doors are complex
-    return doors
-
-
-def detect_architecture(image_path, crop_box=None):
-    """Main detection pipeline."""
+def detect_architecture(image_path):
+    """Main detection pipeline with smart floorplan isolation."""
     img = cv2.imread(image_path)
     if img is None:
         return None
 
-    if crop_box:
-        x, y, w, h = crop_box
-        img = img[y:y+h, x:x+w]
+    # === STEP 0: Smart Floorplan Isolation ===
+    isolated, crop_box = smart_isolate_floorplan(img)
+    cv2.imwrite(ISOLATED_IMAGE_PATH, isolated)
 
-    img_h, img_w = img.shape[:2]
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # Replace the upload image with the isolated version so it shows correctly in editor
+    cv2.imwrite(image_path, isolated)
+
+    img_h, img_w = isolated.shape[:2]
+    gray = cv2.cvtColor(isolated, cv2.COLOR_BGR2GRAY)
 
     # Step 1: Remove text and small components
     binary_clean = remove_text_from_plan(gray)
-
-    # Save preview of cleaned image
     cv2.imwrite(CLEAN_IMAGE_PATH, binary_clean)
 
     # Step 2: Detect lines with Hough
@@ -271,25 +355,28 @@ def detect_architecture(image_path, crop_box=None):
             "image_width": img_w,
             "image_height": img_h,
             "elements": [],
-            "stats": {"lines_raw": 0, "lines_merged": 0, "exterior": 0, "interior": 0}
+            "stats": {"lines_raw": 0, "lines_merged": 0, "exterior": 0, "interior": 0,
+                      "crop": crop_box}
         }
 
     # Step 3: Snap to orthogonal
-    # Hough returns array shape (N, 1, 4) - already correct format for snap_to_orthogonal
     snapped = snap_to_orthogonal(raw_lines)
 
     # Step 4: Merge collinear lines
     merged = merge_collinear_lines(snapped, distance_threshold=15)
 
     # Step 5: Filter very short lines
-    merged = [l for l in merged if math.hypot(l[2] - l[0], l[3] - l[1]) > 40]
+    merged = [l for l in merged if math.hypot(l[2] - l[0], l[3] - l[1]) > 60]
 
-    # Step 6: Classify exterior vs interior
-    exterior_lines, interior_lines = classify_exterior_vs_interior(merged, (img_h, img_w))
+    # Step 6: Find building footprint
+    footprint = find_building_footprint(merged, (img_h, img_w))
 
-    # Step 7: Build exterior polygon
+    # Step 7: Classify exterior vs interior
+    exterior_lines, interior_lines = classify_exterior_vs_interior(merged, footprint)
+
+    # Step 8: Build elements
     elements = []
-    ext_polygon = build_exterior_polygon(exterior_lines)
+    ext_polygon = build_exterior_polygon(footprint)
     if ext_polygon:
         elements.append({
             "type": "extwall",
@@ -298,7 +385,7 @@ def detect_architecture(image_path, crop_box=None):
             "detected": True
         })
 
-    # Step 8: Add interior walls as individual segments
+    # Step 9: Add interior walls
     for line in interior_lines:
         elements.append({
             "type": "intwall",
@@ -317,13 +404,14 @@ def detect_architecture(image_path, crop_box=None):
             "lines_raw": len(raw_lines),
             "lines_merged": len(merged),
             "exterior": len(exterior_lines),
-            "interior": len(interior_lines)
+            "interior": len(interior_lines),
+            "crop": crop_box
         }
     }
 
 
 # ============================================================
-# COLOR DETECTION (existing, kept)
+# COLOR DETECTION (kept from previous version)
 # ============================================================
 
 def clean_mask(mask, iterations=2):
@@ -339,17 +427,13 @@ def get_contours(mask):
 
 
 def auto_detect_colors(image_path):
-    """Detect VAVs, AHU, Ducts by color marking."""
     img = cv2.imread(image_path)
     if img is None:
         return None
-
     h, w = img.shape[:2]
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
     elements = []
 
-    # BLUE VAVs
     blue_mask = cv2.inRange(hsv, np.array([90, 60, 60]), np.array([140, 255, 255]))
     blue_mask = clean_mask(blue_mask, 1)
     for cnt in get_contours(blue_mask):
@@ -359,7 +443,6 @@ def auto_detect_colors(image_path):
         x, y, ww, hh = cv2.boundingRect(cnt)
         elements.append({"type": "vav", "x": int(x + ww / 2), "y": int(y + hh / 2)})
 
-    # GREEN AHU
     green_mask = cv2.inRange(hsv, np.array([40, 60, 60]), np.array([85, 255, 255]))
     green_mask = clean_mask(green_mask, 1)
     candidates = []
@@ -373,7 +456,6 @@ def auto_detect_colors(image_path):
     for a in candidates[:1]:
         elements.append({"type": "ahu", "x": a["x"], "y": a["y"]})
 
-    # RED DUCTS
     red1 = cv2.inRange(hsv, np.array([0, 60, 60]), np.array([10, 255, 255]))
     red2 = cv2.inRange(hsv, np.array([170, 60, 60]), np.array([180, 255, 255]))
     red_mask = clean_mask(cv2.bitwise_or(red1, red2), 1)
@@ -392,7 +474,6 @@ def auto_detect_colors(image_path):
                 "type": "duct",
                 "points": [{"x": int(x + ww / 2), "y": y}, {"x": int(x + ww / 2), "y": y + hh}]
             })
-
     return {"image_width": w, "image_height": h, "elements": elements}
 
 
@@ -417,7 +498,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 </style></head><body>
 <div class="card">
 <div class="logo">&#128274;</div>
-<h1>BAS Generator v23</h1>
+<h1>BAS Generator v23.5</h1>
 <p class="sub">Private Access</p>
 <form method="POST" action="/login">
 <input type="password" name="password" placeholder="Enter password" required autofocus>
@@ -429,7 +510,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 
 
 HOME_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Generator v23</title>
+<html><head><title>BAS Generator v23.5</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
@@ -453,15 +534,15 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 .color-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
 .footer{color:#3a4060;font-size:10px;margin-top:14px;}
 .badge{display:inline-block;background:linear-gradient(135deg,#ff9800,#ff5722);color:white;padding:2px 9px;font-size:10px;border-radius:6px;margin-left:6px;}
-.tip{background:#1a1d28;border-left:3px solid #2d89ef;padding:8px 12px;margin-bottom:12px;font-size:11px;color:#aab0c4;text-align:left;border-radius:5px;}
+.tip{background:#1a1d28;border-left:3px solid #16a34a;padding:8px 12px;margin-bottom:12px;font-size:11px;color:#aab0c4;text-align:left;border-radius:5px;}
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v23 <span class="badge">AUTO ARCH</span></h1>
-<p class="sub">Auto-detect building architecture + HVAC</p>
+<h1>BAS Generator v23.5 <span class="badge">SMART ISOLATION</span></h1>
+<p class="sub">Auto-detect building floorplan + HVAC</p>
 
 <div class="tip">
-<b>NEW:</b> Auto-Detect Architecture extracts walls & rooms from your plan automatically!
+<b>v23.5 NEW:</b> Smart Floorplan Isolation removes title blocks, tables, and legends before detecting walls.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -473,8 +554,8 @@ Manual Editor
 <small>Draw everything yourself</small>
 </button>
 <button type="button" class="option-btn" id="archBtn" onclick="setMode('arch')">
-Auto-Detect Architecture
-<small>Detects walls + rooms (NEW)</small>
+Smart Auto-Detect
+<small>Isolates floorplan + detects walls</small>
 </button>
 <button type="button" class="option-btn" id="colorBtn" onclick="setMode('color')">
 Auto-Detect Colors
@@ -511,7 +592,7 @@ function setMode(mode){
 
 
 EDITOR_PAGE = '''<!DOCTYPE html>
-<html><head><title>CAD Editor v23</title>
+<html><head><title>CAD Editor v23.5</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:8px;height:100vh;display:flex;flex-direction:column;overflow:hidden;}
@@ -531,7 +612,6 @@ canvas{display:block;}
 .btn-red{background:#dc2626;color:white;}
 .btn-gray{background:#333;color:white;}
 .btn-purple{background:#9333ea;color:white;}
-.btn-orange{background:#ea580c;color:white;}
 .spinner{display:inline-block;width:20px;height:20px;border:3px solid #fff;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
 .loading-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.85);display:none;align-items:center;justify-content:center;z-index:100;flex-direction:column;gap:16px;}
@@ -547,7 +627,7 @@ canvas{display:block;}
 {% endif %}
 
 <div class="topbar">
-<h1>CAD Editor v23 - Auto Architecture</h1>
+<h1>CAD Editor v23.5</h1>
 <div style="display:flex;gap:6px;">
 <button onclick="undo()" class="action-btn btn-gray">&#8617; Undo</button>
 <button onclick="clearAll()" class="action-btn btn-red">Clear</button>
@@ -953,7 +1033,7 @@ async function generate(){
 
 
 RESULT_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Graphic v23</title>
+<html><head><title>BAS Graphic v23.5</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:12px;}
@@ -971,8 +1051,8 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 .btn-gray{background:#252a38;color:#aab0c4;}
 .footer{text-align:center;color:#3a4060;font-size:11px;margin-top:10px;}
 </style></head><body>
-<h1>Synchrony BAS Graphic v23</h1>
-<p class="sub">SVG Isometric Render - Ready for Tracer Synchrony / Niagara</p>
+<h1>Synchrony BAS Graphic v23.5</h1>
+<p class="sub">More horizontal cabinet projection - Ready for Tracer Synchrony / Niagara</p>
 <div class="stats">
 <div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
 <div class="stat">AHUs: <b>{{ n_ahus }}</b></div>
@@ -991,13 +1071,19 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 
 <script>
 const data = {{ detection_json | safe }};
-const ISO_ANGLE = Math.PI / 9;
-const COS_ISO = Math.cos(ISO_ANGLE);
-const SIN_ISO = Math.sin(ISO_ANGLE);
 
-function isoProject(x, y, z){
-    const sx = (x - y) * COS_ISO;
-    const sy = (x + y) * SIN_ISO - z;
+// === MORE HORIZONTAL PROJECTION (v23.5) ===
+// Cabinet-like projection: minimal Y-axis skew, slight angle for depth
+// X stays horizontal, Y moves slightly down, Z (height) goes up
+const SKEW_ANGLE = Math.PI / 14;  // ~12.8 degrees (much less than iso 30 deg)
+const COS_SK = Math.cos(SKEW_ANGLE);
+const SIN_SK = Math.sin(SKEW_ANGLE);
+
+function cabinetProject(x, y, z){
+    // Cabinet projection: X stays full-scale horizontal,
+    // Y is projected at angle (compressed), Z is vertical
+    const sx = x + y * COS_SK * 0.5;
+    const sy = y * SIN_SK - z;
     return [sx, sy];
 }
 
@@ -1013,9 +1099,9 @@ function generateSVG(){
     }
     const bcx = (minX + maxX) / 2;
     const bcy = (minY + maxY) / 2;
-    const WALL_HEIGHT = 50;
+    const WALL_HEIGHT = 45;
     function toLocal(p){ return { x: p.x - bcx, y: p.y - bcy }; }
-    function proj(x, y, z = 0){ return isoProject(x, y, z); }
+    function proj(x, y, z = 0){ return cabinetProject(x, y, z); }
 
     let svgMinX = 0, svgMaxX = 0, svgMinY = 0, svgMaxY = 0;
     const corners = [
@@ -1046,11 +1132,11 @@ function generateSVG(){
     svg += `<rect width="${svgW}" height="${svgH}" fill="#0a0a0d"/>`;
     svg += `<defs>`;
 
-    const tileW = 40 * COS_ISO * 2;
-    const tileH = 40 * SIN_ISO * 2;
-    svg += `<pattern id="isoFloor" width="${tileW}" height="${tileH}" patternUnits="userSpaceOnUse">`;
-    svg += `<rect width="${tileW}" height="${tileH}" fill="#dcdce0"/>`;
-    svg += `<polygon points="${tileW/2},0 ${tileW},${tileH/2} ${tileW/2},${tileH} 0,${tileH/2}" fill="none" stroke="#cfcfd3" stroke-width="0.4" opacity="0.6"/>`;
+    // Floor pattern - subtle grid for more horizontal cabinet projection
+    const tileSize = 45;
+    svg += `<pattern id="floorGrid" width="${tileSize}" height="${tileSize * SIN_SK * 1.5}" patternUnits="userSpaceOnUse">`;
+    svg += `<rect width="${tileSize}" height="${tileSize * SIN_SK * 1.5}" fill="#dcdce0"/>`;
+    svg += `<rect width="${tileSize}" height="${tileSize * SIN_SK * 1.5}" fill="none" stroke="#cfcfd3" stroke-width="0.5" opacity="0.7"/>`;
     svg += `</pattern>`;
 
     svg += `<linearGradient id="extSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#c8c8ce"/><stop offset="100%" stop-color="#929298"/></linearGradient>`;
@@ -1076,7 +1162,7 @@ function generateSVG(){
             path += (i === 0 ? 'M' : 'L') + sx + ',' + sy + ' ';
         }
         path += 'Z';
-        svg += `<path d="${path}" fill="url(#isoFloor)" stroke="#a0a0a4" stroke-width="0.4"/>`;
+        svg += `<path d="${path}" fill="url(#floorGrid)" stroke="#a0a0a4" stroke-width="0.4"/>`;
     }
 
     function drawThickWall(p1, p2, height, thickness, sideG, topG, stroke){
@@ -1328,7 +1414,8 @@ def upload():
                 initial_elements = result["elements"]
                 stats = result["stats"]
                 n_walls = sum(1 for e in initial_elements if e.get("type") in ("extwall", "intwall"))
-                detected_message = f"Auto-detected architecture: {n_walls} walls extracted from {stats['lines_raw']} raw lines. Review and adjust!"
+                crop = stats.get("crop", (0, 0, 0, 0))
+                detected_message = f"Smart isolation: cropped to {crop[2]}x{crop[3]}. Detected {n_walls} walls from {stats['lines_raw']} raw lines. Review and adjust!"
             else:
                 detected_message = "Detection ran but found nothing. Try Manual mode."
         except Exception as e:
@@ -1339,10 +1426,9 @@ def upload():
             result = auto_detect_colors(UPLOAD_IMAGE_PATH)
             if result:
                 initial_elements = result["elements"]
-                n_det = len(initial_elements)
-                detected_message = f"Auto-detected by colors: {n_det} HVAC elements found."
+                detected_message = f"Auto-detected by colors: {len(initial_elements)} HVAC elements."
         except Exception as e:
-            detected_message = f"Color detection error: {str(e)}. Continuing in manual mode."
+            detected_message = f"Color detection error: {str(e)}."
             initial_elements = []
 
     return render_template_string(
