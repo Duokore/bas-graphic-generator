@@ -127,65 +127,217 @@ def smart_isolate_floorplan(img):
 # v30: CLEAN ARCHITECTURAL MASK GENERATOR
 # ============================================================
 
-def generate_clean_mask(img_bgr, min_wall_thickness=2, keep_long_lines=True):
-    """v30: Generate a clean architectural mask showing ONLY walls and shape.
+def _estimate_line_thickness(binary_img, sample_pixels=200):
+    """v30.2: Estimate the median line thickness in the binary image.
+    Used to adapt erosion kernel size to the plan's drawing style.
+    Returns thickness in pixels (median of distance transform peaks).
+    """
+    if np.count_nonzero(binary_img) == 0:
+        return 3  # safe default
+    # Distance transform: each white pixel gets distance to nearest black pixel
+    dist = cv2.distanceTransform(binary_img, cv2.DIST_L2, 3)
+    # Get distance values where there IS a line
+    line_distances = dist[binary_img > 0]
+    if len(line_distances) == 0:
+        return 3
+    # Half-thickness of a line = the max distance you can go before hitting black
+    # so total thickness ~= 2 * median of local maxes
+    # Simpler: just take 90th percentile of distance values * 2
+    p90 = np.percentile(line_distances, 90)
+    estimated_thickness = max(2, int(round(p90 * 2)))
+    return min(estimated_thickness, 12)  # cap at 12 for sanity
 
-    Strategy:
-    1. Binarize the image
-    2. Filter by connected components (remove text, small symbols, hatches)
-    3. Apply morphological operations to keep only thick lines (walls)
-    4. Remove thin lines (ducts, dimension lines, annotations)
-    5. Return a white-on-black image with only architectural geometry
 
-    Returns: clean_mask (binary image, walls=white on black background)
+def _is_blob_like(cw, ch, area):
+    """v30.2: Detect if a connected component is a 'filled blob' vs a 'line/wall'.
+    Walls are hollow elongated strokes (low fill ratio, high aspect).
+    Blobs are filled regions (high fill ratio).
+    Returns True if it looks like a filled blob we should reject.
+    """
+    bbox_area = cw * ch
+    if bbox_area <= 0:
+        return False
+    fill_ratio = area / bbox_area
+    # A wall outline (rectangle perimeter) has fill_ratio < 0.4
+    # A filled blob/region has fill_ratio > 0.6
+    # AND the blob is roughly square-ish (aspect < 4)
+    aspect = max(cw, ch) / max(min(cw, ch), 1)
+    return fill_ratio > 0.55 and aspect < 4 and area > 800
+
+
+def _repair_small_gaps(mask, max_gap=10):
+    """v30.2: Connect endpoint pairs that are very close (within max_gap pixels).
+    Uses morphological closing with a small SMART kernel - line-shaped, not block.
+    """
+    # Use a small line-shaped close in both directions
+    # Horizontal close (3xK)
+    kh = cv2.getStructuringElement(cv2.MORPH_RECT, (max_gap, 1))
+    closed_h = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kh, iterations=1)
+    # Vertical close (Kx3)
+    kv = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max_gap))
+    closed_v = cv2.morphologyEx(closed_h, cv2.MORPH_CLOSE, kv, iterations=1)
+    return closed_v
+
+
+def _remove_solid_filled_regions(mask, min_area=400):
+    """v30.2: Remove SOLID filled regions inside the mask (elevator shafts, hatch fills).
+    
+    A wall is a HOLLOW outline (thin stroke).
+    A filled region is SOLID (mostly pixels-on).
+    
+    Strategy: For each connected component, check the inner area.
+    If most of the bbox is filled = it's a blob, erase that region.
+    
+    To do this we:
+    1. Find each filled region (solid blob) using morphological opening
+    2. Subtract those regions from the mask
+    """
+    # Heavy opening with a small square kernel: this OBLITERATES line strokes
+    # but PRESERVES solid filled regions
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    solid_only = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
+    
+    # Now solid_only contains only the "filled" parts (no thin walls)
+    # Filter small false positives
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(solid_only, connectivity=8)
+    blobs_to_remove = np.zeros_like(mask)
+    for i in range(1, num_labels):
+        x, y, cw, ch, area = stats[i]
+        # Only treat as blob if it has substantial solid area
+        if area >= min_area:
+            blobs_to_remove[labels == i] = 255
+    
+    # Dilate the blob mask slightly so we erase the blob AND its near-stroke neighborhood
+    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    blobs_to_remove = cv2.dilate(blobs_to_remove, kernel_dilate, iterations=2)
+    
+    # Subtract from the mask
+    result = cv2.bitwise_and(mask, cv2.bitwise_not(blobs_to_remove))
+    return result
+
+
+def generate_clean_mask(img_bgr, debug=False):
+    """v30.2: Generate a clean architectural mask with ADAPTIVE thresholds.
+
+    Improvements over v30:
+    - Adaptive erosion kernel based on detected line thickness
+    - Filled-blob rejection (rooms incorrectly filled get removed)
+    - SOLID region removal via morphological opening (elevator shafts, hatches)
+    - Gap repair with line-shaped kernels (not block-shaped)
+    - Better wall preservation for thin-walled plans
+
+    Returns: clean_mask (binary image) OR (clean_mask, stats) if debug=True
     """
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape[:2]
 
-    # Step 1: Binary inverted (walls = white, background = black)
+    # Step 1: Binary inverted
     _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+    raw_pixels = int(np.count_nonzero(binary))
 
-    # Step 2: Connected components filter - keep only "wall-like" elements
-    # (long aspect ratio OR large area)
+    # Step 1b (v30.2 NEW): REMOVE SOLID FILLED REGIONS from binary
+    # This kills elevator shafts, hatched areas, and filled symbols BEFORE other steps
+    binary = _remove_solid_filled_regions(binary, min_area=400)
+    after_blob_removal = int(np.count_nonzero(binary))
+
+    # Step 2 (v30.2): ESTIMATE line thickness in this specific plan
+    median_thickness = _estimate_line_thickness(binary)
+
+    # Adaptive parameters based on detected thickness:
+    # - Thin-walled plans (compressed, small): use erosion 2x2 to preserve walls
+    # - Normal plans: erosion 3x3
+    # - Thick-walled plans: erosion 4x4 to kill ducts more aggressively
+    if median_thickness <= 3:
+        erode_size = 2
+        short_dim_min = 2  # Accept thin survivors on compressed plans
+        area_min = 150
+        long_dim_min = 50
+    elif median_thickness >= 6:
+        erode_size = 4
+        short_dim_min = 5
+        area_min = 350
+        long_dim_min = 80
+    else:
+        erode_size = 3
+        short_dim_min = 3
+        area_min = 250
+        long_dim_min = 70
+
+    # Step 3: Initial CC filter - kill obvious text and tiny symbols
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     architectural = np.zeros_like(binary)
+    n_kept_step3 = 0
     for i in range(1, num_labels):
         x, y, cw, ch, area = stats[i]
         aspect = max(cw, ch) / max(min(cw, ch), 1)
-        # Keep: long lines (aspect>4 area>120) OR large rectangles (area>1000 dim>80)
-        # OR very large blobs (the building outline itself)
-        if (aspect > 4 and area > 120) or (area > 1000 and max(cw, ch) > 80):
+        # Keep elongated OR large components
+        if (aspect > 4 and area > 100) or (area > 800 and max(cw, ch) > 60):
             architectural[labels == i] = 255
+            n_kept_step3 += 1
 
-    # Step 3: Erode aggressively to remove THIN lines (ducts 1-2px) 
-    # Walls survive because they are 4-5px thick. Ducts disappear completely.
-    # Use a 3x3 kernel - anything thinner than 3px vanishes.
-    kernel_thin = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    eroded = cv2.erode(architectural, kernel_thin, iterations=1)
+    # Step 4 (v30.2 ADAPTIVE): Erode to kill thin lines
+    kernel_erode = cv2.getStructuringElement(cv2.MORPH_RECT, (erode_size, erode_size))
+    eroded = cv2.erode(architectural, kernel_erode, iterations=1)
 
-    # Step 4: Keep only what survived erosion - these are the THICK walls
-    # Dilate back so they look solid
-    kernel_restore = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    # Step 5: Dilate back to restore wall body
+    kernel_restore = cv2.getStructuringElement(cv2.MORPH_RECT, (erode_size, erode_size))
     walls_only = cv2.dilate(eroded, kernel_restore, iterations=1)
 
-    # Step 5: Second connected components pass - keep only walls of meaningful size
-    # Walls are ELONGATED but also have minimum THICKNESS (not paper-thin lines).
+    # Step 6 (v30.2): Filter with adaptive thresholds + REJECT FILLED BLOBS
     num_labels2, labels2, stats2, _ = cv2.connectedComponentsWithStats(walls_only, connectivity=8)
     clean_mask = np.zeros_like(walls_only)
+    n_kept_step6 = 0
+    n_blobs_rejected = 0
     for i in range(1, num_labels2):
         x, y, cw, ch, area = stats2[i]
         aspect = max(cw, ch) / max(min(cw, ch), 1)
-        # v30: Require minimum SHORT dimension >= 4 (kills paper-thin survived ducts)
-        # AND keep elongated/large walls
         short_dim = min(cw, ch)
-        if short_dim >= 4 and ((aspect > 3 and area > 250 and max(cw, ch) > 70) or area > 5000):
+
+        # v30.2 NEW: Reject filled-blob components (rooms incorrectly merged)
+        # Exception: VERY large blobs are usually the building outline, keep them
+        if _is_blob_like(cw, ch, area) and area < 15000:
+            n_blobs_rejected += 1
+            continue
+
+        # Keep walls: short_dim ok AND (elongated OR very large for outline)
+        keep_wall = (
+            short_dim >= short_dim_min and
+            ((aspect > 3 and area > area_min and max(cw, ch) > long_dim_min) or area > 4000)
+        )
+        if keep_wall:
             clean_mask[labels2 == i] = 255
+            n_kept_step6 += 1
 
-    # Step 6: Close small gaps in walls (e.g. where doors break them)
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+    # Step 7 (v30.2): SMART gap repair - adaptive size, line-shaped kernel
+    # Bigger gaps for thicker walls (they typically have bigger discontinuities)
+    gap_size = max(8, median_thickness * 2)
+    clean_mask = _repair_small_gaps(clean_mask, max_gap=gap_size)
 
-    return clean_mask
+    # Step 8 (v30.2): Final tiny cleanup - drop islands smaller than 200px
+    num_final, labels_final, stats_final, _ = cv2.connectedComponentsWithStats(clean_mask, connectivity=8)
+    final_mask = np.zeros_like(clean_mask)
+    n_final = 0
+    for i in range(1, num_final):
+        x, y, cw, ch, area = stats_final[i]
+        if area >= 200:
+            final_mask[labels_final == i] = 255
+            n_final += 1
+
+    stats_dict = {
+        "median_thickness": median_thickness,
+        "erode_size": erode_size,
+        "raw_pixels": raw_pixels,
+        "after_blob_removal_pixels": after_blob_removal,
+        "after_text_filter": n_kept_step3,
+        "after_wall_filter": n_kept_step6,
+        "blobs_rejected": n_blobs_rejected,
+        "final_components": n_final,
+        "final_pixels": int(np.count_nonzero(final_mask)),
+    }
+
+    if debug:
+        return final_mask, stats_dict
+    return final_mask
 
 
 def render_mask_preview(clean_mask, original_img):
@@ -1091,11 +1243,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v30.1 <span class="badge">MASK PREVIEW (FIXED)</span></h1>
+<h1>BAS Generator v30.2 <span class="badge">MASK STABILIZED</span></h1>
 <p class="sub">Clean architectural mask + smart cleanup workflow</p>
 
 <div class="tip">
-<b>v30.1 FIX:</b> Mask preview images now render correctly (data URI prefix). Validated end-to-end.
+<b>v30.2 NEW:</b> Adaptive thresholds, blob rejection, smart gap repair, debug stats. Works on more plan types!
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1195,6 +1347,10 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 The clean mask on the right shows ONLY the architectural walls and building shape.
 If it looks good, click <b>Approve</b> to enter the editor with this as a reference layer.
 If too much was removed, click <b>Re-process</b> to adjust filters.
+</div>
+
+<div style="background:#1a1d24;border:1px solid #2a2f3a;border-radius:12px;padding:10px 22px;margin-top:10px;font-family:'Courier New',monospace;font-size:12px;color:#94a3b8;">
+<b style="color:#22d3ee;">Debug stats:</b> {{ stats_text }}
 </div>
 
 <div class="compare">
@@ -2681,16 +2837,25 @@ def upload():
             # First apply smart isolation (reuse existing function)
             isolated, _crop = smart_isolate_floorplan(img)
             cv2.imwrite(UPLOAD_IMAGE_PATH, isolated)
-            # Generate the clean architectural mask
-            clean_mask = generate_clean_mask(isolated)
+            # Generate the clean architectural mask (v30.2: with debug stats)
+            clean_mask, mask_stats = generate_clean_mask(isolated, debug=True)
             preview = render_mask_preview(clean_mask, isolated)
-            # Save both for the preview page
             cv2.imwrite(MASK_BINARY_PATH, clean_mask)
             cv2.imwrite(MASK_PREVIEW_PATH, preview)
+            # v30.2: Build stats text for display
+            stats_text = (
+                f"thickness={mask_stats['median_thickness']}px, "
+                f"erode={mask_stats['erode_size']}x{mask_stats['erode_size']}, "
+                f"text-filter: {mask_stats['after_text_filter']} kept, "
+                f"wall-filter: {mask_stats['after_wall_filter']} kept, "
+                f"blobs rejected: {mask_stats['blobs_rejected']}, "
+                f"final components: {mask_stats['final_components']}"
+            )
             return render_template_string(
                 MASK_PREVIEW_PAGE,
                 original_b64=image_to_base64(UPLOAD_IMAGE_PATH),
-                preview_b64=image_to_base64(MASK_PREVIEW_PATH)
+                preview_b64=image_to_base64(MASK_PREVIEW_PATH),
+                stats_text=stats_text
             )
         except Exception as e:
             import traceback
@@ -2742,14 +2907,23 @@ def mask_retry():
         img = cv2.imread(UPLOAD_IMAGE_PATH)
         if img is None:
             return "<h2 style='color:white;background:#0d0f14;padding:30px;'>Could not re-read uploaded image. <a href='/' style='color:#2d89ef'>Back</a></h2>"
-        clean_mask = generate_clean_mask(img)
+        clean_mask, mask_stats = generate_clean_mask(img, debug=True)
         preview = render_mask_preview(clean_mask, img)
         cv2.imwrite(MASK_BINARY_PATH, clean_mask)
         cv2.imwrite(MASK_PREVIEW_PATH, preview)
+        stats_text = (
+            f"thickness={mask_stats['median_thickness']}px, "
+            f"erode={mask_stats['erode_size']}x{mask_stats['erode_size']}, "
+            f"text-filter: {mask_stats['after_text_filter']} kept, "
+            f"wall-filter: {mask_stats['after_wall_filter']} kept, "
+            f"blobs rejected: {mask_stats['blobs_rejected']}, "
+            f"final components: {mask_stats['final_components']}"
+        )
         return render_template_string(
             MASK_PREVIEW_PAGE,
             original_b64=image_to_base64(UPLOAD_IMAGE_PATH),
-            preview_b64=image_to_base64(MASK_PREVIEW_PATH)
+            preview_b64=image_to_base64(MASK_PREVIEW_PATH),
+            stats_text=stats_text
         )
     except Exception as e:
         import traceback
