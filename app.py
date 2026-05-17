@@ -38,7 +38,7 @@ def pdf_to_png(pdf_path, out_path):
 
 
 # ============================================================
-# SMART FLOORPLAN ISOLATION (v25 NEW)
+# SMART FLOORPLAN ISOLATION (v26 NEW)
 # ============================================================
 
 def smart_isolate_floorplan(img):
@@ -380,8 +380,179 @@ def detect_doors_in_walls(lines, min_gap=20, max_gap=70):
     return doors
 
 
+def measure_line_thickness(binary_img, x1, y1, x2, y2, max_check=10):
+    """Measure perpendicular thickness of a line in the binary image.
+    Returns average thickness in pixels."""
+    h, w = binary_img.shape[:2]
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.hypot(dx, dy)
+    if length < 1:
+        return 0
+    # Perpendicular direction (unit vector)
+    nx = -dy / length
+    ny = dx / length
+
+    # Sample 5 points along the line
+    samples = []
+    for t in [0.2, 0.35, 0.5, 0.65, 0.8]:
+        px = int(x1 + dx * t)
+        py = int(y1 + dy * t)
+        # Measure how far in perpendicular direction we have white pixels
+        thickness_pos = 0
+        for k in range(max_check):
+            tx = int(px + nx * k)
+            ty = int(py + ny * k)
+            if 0 <= tx < w and 0 <= ty < h and binary_img[ty, tx] > 0:
+                thickness_pos = k + 1
+            else:
+                break
+        thickness_neg = 0
+        for k in range(max_check):
+            tx = int(px - nx * k)
+            ty = int(py - ny * k)
+            if 0 <= tx < w and 0 <= ty < h and binary_img[ty, tx] > 0:
+                thickness_neg = k + 1
+            else:
+                break
+        samples.append(thickness_pos + thickness_neg)
+
+    samples.sort()
+    # Return median to reduce outlier impact
+    return samples[len(samples) // 2]
+
+
+def filter_lines_by_thickness(lines, binary_img, min_thickness=3):
+    """Keep only lines whose underlying drawing is thick (walls), not thin (ducts/text)."""
+    filtered = []
+    for l in lines:
+        x1, y1, x2, y2 = l
+        thickness = measure_line_thickness(binary_img, x1, y1, x2, y2)
+        if thickness >= min_thickness:
+            filtered.append(l)
+    return filtered
+
+
+def filter_dense_zones(lines, img_shape, cell_size=60, max_lines_per_cell=6):
+    """Detect dense areas (HVAC symbols) and remove lines passing through them."""
+    h, w = img_shape[:2]
+    if not lines:
+        return lines
+
+    cells_h = (h // cell_size) + 1
+    cells_w = (w // cell_size) + 1
+    grid = [[0 for _ in range(cells_w)] for _ in range(cells_h)]
+
+    # Count line midpoints per cell
+    midpoints = []
+    for l in lines:
+        mx = (l[0] + l[2]) // 2
+        my = (l[1] + l[3]) // 2
+        cx = mx // cell_size
+        cy = my // cell_size
+        if 0 <= cy < cells_h and 0 <= cx < cells_w:
+            grid[cy][cx] += 1
+        midpoints.append((cx, cy))
+
+    # Mark dense cells
+    dense_cells = set()
+    for cy in range(cells_h):
+        for cx in range(cells_w):
+            if grid[cy][cx] > max_lines_per_cell:
+                dense_cells.add((cx, cy))
+
+    # Remove lines whose midpoint falls in dense cell
+    filtered = []
+    for i, l in enumerate(lines):
+        if midpoints[i] not in dense_cells:
+            filtered.append(l)
+    return filtered
+
+
+def filter_dimension_pairs(lines, max_parallel_dist=5):
+    """Remove pairs of very close parallel lines (likely dimension lines/double lines)."""
+    horizontal = [l for l in lines if l[1] == l[3]]
+    vertical = [l for l in lines if l[0] == l[2]]
+    to_remove = set()
+
+    # Find horizontal pairs that are too close (likely dimension lines)
+    for i in range(len(horizontal)):
+        for j in range(i + 1, len(horizontal)):
+            l1 = horizontal[i]
+            l2 = horizontal[j]
+            ydiff = abs(l1[1] - l2[1])
+            if 1 <= ydiff <= max_parallel_dist:
+                # Check x overlap
+                ox1 = max(l1[0], l2[0])
+                ox2 = min(l1[2], l2[2])
+                if ox2 > ox1:
+                    to_remove.add(tuple(l1))
+                    to_remove.add(tuple(l2))
+
+    for i in range(len(vertical)):
+        for j in range(i + 1, len(vertical)):
+            l1 = vertical[i]
+            l2 = vertical[j]
+            xdiff = abs(l1[0] - l2[0])
+            if 1 <= xdiff <= max_parallel_dist:
+                oy1 = max(l1[1], l2[1])
+                oy2 = min(l1[3], l2[3])
+                if oy2 > oy1:
+                    to_remove.add(tuple(l1))
+                    to_remove.add(tuple(l2))
+
+    return [l for l in lines if tuple(l) not in to_remove]
+
+
+def reconstruct_rooms_perimeter(lines, img_shape):
+    """Try to reconstruct the actual building perimeter from longest exterior walls.
+    Returns ordered list of points or None if can't reconstruct."""
+    if not lines or len(lines) < 4:
+        return None
+
+    h, w = img_shape[:2]
+
+    # Sort lines by length descending; longest are most likely exterior walls
+    lines_sorted = sorted(lines, key=lambda l: -math.hypot(l[2] - l[0], l[3] - l[1]))
+
+    # Take top 30% of longest lines as exterior candidates
+    n_top = max(8, len(lines_sorted) // 3)
+    top_lines = lines_sorted[:n_top]
+
+    horizontal = [l for l in top_lines if l[1] == l[3]]
+    vertical = [l for l in top_lines if l[0] == l[2]]
+
+    if not horizontal or not vertical:
+        return None
+
+    # Find topmost and bottommost long horizontal lines
+    horizontal.sort(key=lambda l: l[1])
+    top_h = horizontal[0]
+    bottom_h = horizontal[-1]
+
+    vertical.sort(key=lambda l: l[0])
+    left_v = vertical[0]
+    right_v = vertical[-1]
+
+    min_x = left_v[0]
+    max_x = right_v[0]
+    min_y = top_h[1]
+    max_y = bottom_h[1]
+
+    # Validate the rectangle has meaningful size
+    if (max_x - min_x) < w * 0.3 or (max_y - min_y) < h * 0.3:
+        return None
+
+    return [
+        {"x": int(min_x), "y": int(min_y)},
+        {"x": int(max_x), "y": int(min_y)},
+        {"x": int(max_x), "y": int(max_y)},
+        {"x": int(min_x), "y": int(max_y)}
+    ]
+
+
 def detect_architecture(image_path):
-    """Main detection pipeline with smart floorplan isolation."""
+    """v26: Semantic architecture detection - filters HVAC noise from real walls."""
     img = cv2.imread(image_path)
     if img is None:
         return None
@@ -389,47 +560,80 @@ def detect_architecture(image_path):
     # === STEP 0: Smart Floorplan Isolation ===
     isolated, crop_box = smart_isolate_floorplan(img)
     cv2.imwrite(ISOLATED_IMAGE_PATH, isolated)
-
-    # Replace the upload image with the isolated version so it shows correctly in editor
     cv2.imwrite(image_path, isolated)
 
     img_h, img_w = isolated.shape[:2]
     gray = cv2.cvtColor(isolated, cv2.COLOR_BGR2GRAY)
 
-    # Step 1: Remove text and small components
+    # === STEP 1: Build a binary image to measure thickness ===
+    _, binary_full = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+    # === STEP 2: Remove text/small components ===
     binary_clean = remove_text_from_plan(gray)
     cv2.imwrite(CLEAN_IMAGE_PATH, binary_clean)
 
-    # Step 2: Detect lines with Hough
+    # === STEP 3: Detect raw lines ===
     raw_lines = detect_walls_hough(binary_clean)
+    n_raw = len(raw_lines)
 
-    if len(raw_lines) == 0:
+    if n_raw == 0:
         return {
-            "image_width": img_w,
-            "image_height": img_h,
-            "elements": [],
-            "stats": {"lines_raw": 0, "lines_merged": 0, "exterior": 0, "interior": 0,
-                      "crop": crop_box}
+            "image_width": img_w, "image_height": img_h, "elements": [],
+            "stats": {"lines_raw": 0, "after_snap": 0, "after_merge": 0,
+                      "after_thickness": 0, "after_density": 0, "after_dims": 0,
+                      "exterior": 0, "interior": 0, "doors": 0, "crop": crop_box}
         }
 
-    # Step 3: Snap to orthogonal
-    snapped = snap_to_orthogonal(raw_lines)
+    # === STEP 4: Snap to orthogonal ===
+    snapped = snap_to_orthogonal(raw_lines, angle_tolerance=6)
+    n_snapped = len(snapped)
 
-    # Step 4: Merge collinear lines
-    merged = merge_collinear_lines(snapped, distance_threshold=15)
+    # === STEP 5: Merge collinear (more aggressive) ===
+    merged = merge_collinear_lines(snapped, distance_threshold=18)
+    n_merged = len(merged)
 
-    # Step 5: Filter very short lines
-    merged = [l for l in merged if math.hypot(l[2] - l[0], l[3] - l[1]) > 60]
+    # === STEP 6 (v26 SEMANTIC): Filter by minimum length first ===
+    merged = [l for l in merged if math.hypot(l[2] - l[0], l[3] - l[1]) > 80]
 
-    # Step 6: Find building footprint
-    footprint = find_building_footprint(merged, (img_h, img_w))
+    # === STEP 7 (v26 SEMANTIC): Filter by line THICKNESS ===
+    # Real walls are thick (3+ pixels), ducts/text are thin
+    thick_lines = filter_lines_by_thickness(merged, binary_full, min_thickness=3)
+    n_thick = len(thick_lines)
 
-    # Step 7: Classify exterior vs interior
-    exterior_lines, interior_lines = classify_exterior_vs_interior(merged, footprint)
+    # === STEP 8 (v26 SEMANTIC): Remove dense HVAC zones ===
+    # If many lines are clustered in a small area, it's likely an HVAC symbol
+    after_density = filter_dense_zones(thick_lines, (img_h, img_w),
+                                        cell_size=70, max_lines_per_cell=5)
+    n_density = len(after_density)
 
-    # Step 8: Build elements
+    # === STEP 9 (v26 SEMANTIC): Remove dimension line pairs ===
+    after_dims = filter_dimension_pairs(after_density, max_parallel_dist=6)
+    n_dims = len(after_dims)
+
+    # === STEP 10 (v26): Second merge pass to join walls with text gaps ===
+    final_walls = merge_collinear_lines(after_dims, distance_threshold=35)
+
+    # === STEP 11: Build perimeter from actual long walls (not bounding box) ===
+    ext_polygon = reconstruct_rooms_perimeter(final_walls, (img_h, img_w))
+    if ext_polygon is None:
+        # Fallback to footprint method
+        footprint = find_building_footprint(final_walls, (img_h, img_w))
+        ext_polygon = build_exterior_polygon(footprint) if footprint else None
+
+    # === STEP 12: Classify exterior vs interior ===
+    if ext_polygon:
+        # Use polygon bounds for classification
+        xs = [p["x"] for p in ext_polygon]
+        ys = [p["y"] for p in ext_polygon]
+        footprint = {"min_x": min(xs), "max_x": max(xs),
+                     "min_y": min(ys), "max_y": max(ys)}
+    else:
+        footprint = None
+
+    exterior_lines, interior_lines = classify_exterior_vs_interior(final_walls, footprint)
+
+    # === STEP 13: Build elements ===
     elements = []
-    ext_polygon = build_exterior_polygon(footprint)
     if ext_polygon:
         elements.append({
             "type": "extwall",
@@ -438,7 +642,6 @@ def detect_architecture(image_path):
             "detected": True
         })
 
-    # Step 9: Add interior walls
     for line in interior_lines:
         elements.append({
             "type": "intwall",
@@ -449,8 +652,8 @@ def detect_architecture(image_path):
             "detected": True
         })
 
-    # Step 10 (v25): Detect doors as gaps in collinear walls
-    doors = detect_doors_in_walls(merged)
+    # === STEP 14: Detect doors as gaps in collinear walls ===
+    doors = detect_doors_in_walls(final_walls)
     elements.extend(doors)
 
     return {
@@ -458,8 +661,12 @@ def detect_architecture(image_path):
         "image_height": img_h,
         "elements": elements,
         "stats": {
-            "lines_raw": len(raw_lines),
-            "lines_merged": len(merged),
+            "lines_raw": n_raw,
+            "after_snap": n_snapped,
+            "after_merge": n_merged,
+            "after_thickness": n_thick,
+            "after_density": n_density,
+            "after_dims": n_dims,
             "exterior": len(exterior_lines),
             "interior": len(interior_lines),
             "doors": len(doors),
@@ -556,7 +763,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 </style></head><body>
 <div class="card">
 <div class="logo">&#128274;</div>
-<h1>BAS Generator v25</h1>
+<h1>BAS Generator v26</h1>
 <p class="sub">Private Access</p>
 <form method="POST" action="/login">
 <input type="password" name="password" placeholder="Enter password" required autofocus>
@@ -568,7 +775,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 
 
 HOME_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Generator v25</title>
+<html><head><title>BAS Generator v26</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
@@ -596,11 +803,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v25 <span class="badge">SMART CORRECTION</span></h1>
+<h1>BAS Generator v26 <span class="badge">SEMANTIC FILTER</span></h1>
 <p class="sub">Auto-detect building floorplan + HVAC</p>
 
 <div class="tip">
-<b>v25 NEW:</b> Door detection + Rectangle Eraser + Snap Walls + Clear Detected. Faster cleanup workflow!
+<b>v26 NEW:</b> Semantic wall filtering - thickness analysis, HVAC zone removal, dimension filter. Way less noise!
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -650,7 +857,7 @@ function setMode(mode){
 
 
 EDITOR_PAGE = '''<!DOCTYPE html>
-<html><head><title>CAD Editor v25</title>
+<html><head><title>CAD Editor v26</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:8px;height:100vh;display:flex;flex-direction:column;overflow:hidden;}
@@ -687,7 +894,7 @@ canvas{display:block;}
 {% endif %}
 
 <div class="topbar">
-<h1>CAD Editor v25</h1>
+<h1>CAD Editor v26</h1>
 <div style="display:flex;gap:6px;">
 <button onclick="undo()" class="action-btn btn-gray">&#8617; Undo</button>
 <button onclick="clearDetectedOnly()" class="action-btn btn-orange">Clear Detected</button>
@@ -763,10 +970,10 @@ let currentPolyline = null;
 let hoverPoint = null;
 let selectedElement = null;
 let dragOffset = null;
-// v25: Rectangle eraser state
+// v26: Rectangle eraser state
 let eraseRectStart = null;
 let eraseRectCurrent = null;
-// v25: Door state (2-click line)
+// v26: Door state (2-click line)
 let doorFirstPoint = null;
 
 const COLORS = {
@@ -810,7 +1017,7 @@ function selectTool(btn){
         currentPolyline = null;
         saveState();
     }
-    // v25: Reset new tool states
+    // v26: Reset new tool states
     eraseRectStart = null;
     eraseRectCurrent = null;
     doorFirstPoint = null;
@@ -858,7 +1065,7 @@ drawCanvas.addEventListener('click', function(e){
         }
         redraw(); return;
     }
-    // v25: Door tool (2 clicks)
+    // v26: Door tool (2 clicks)
     if(currentTool === 'door'){
         if(!doorFirstPoint){
             doorFirstPoint = { x: pos.x, y: pos.y };
@@ -896,7 +1103,7 @@ drawCanvas.addEventListener('mousemove', function(e){
         redraw();
         return;
     }
-    // v25: Rectangle eraser drag preview
+    // v26: Rectangle eraser drag preview
     if(currentTool === 'erase_rect' && eraseRectStart){
         eraseRectCurrent = pos;
         redraw();
@@ -907,7 +1114,7 @@ drawCanvas.addEventListener('mousemove', function(e){
 
 drawCanvas.addEventListener('mousedown', function(e){
     const pos = getMousePos(e);
-    // v25: Rectangle eraser start
+    // v26: Rectangle eraser start
     if(currentTool === 'erase_rect'){
         eraseRectStart = pos;
         eraseRectCurrent = pos;
@@ -923,7 +1130,7 @@ drawCanvas.addEventListener('mousedown', function(e){
 });
 
 drawCanvas.addEventListener('mouseup', function(e){
-    // v25: Rectangle eraser apply
+    // v26: Rectangle eraser apply
     if(currentTool === 'erase_rect' && eraseRectStart && eraseRectCurrent){
         const rx1 = Math.min(eraseRectStart.x, eraseRectCurrent.x);
         const ry1 = Math.min(eraseRectStart.y, eraseRectCurrent.y);
@@ -1042,7 +1249,7 @@ function redraw(){
             drawCtx.setLineDash([]);
         }
     }
-    // v25: Door preview after first click
+    // v26: Door preview after first click
     if(doorFirstPoint && hoverPoint){
         drawCtx.fillStyle = '#facc15';
         drawCtx.beginPath();
@@ -1057,7 +1264,7 @@ function redraw(){
         drawCtx.stroke();
         drawCtx.setLineDash([]);
     }
-    // v25: Rectangle eraser preview
+    // v26: Rectangle eraser preview
     if(eraseRectStart && eraseRectCurrent){
         const x = Math.min(eraseRectStart.x, eraseRectCurrent.x);
         const y = Math.min(eraseRectStart.y, eraseRectCurrent.y);
@@ -1115,7 +1322,7 @@ function drawElement(el, inProgress = false){
         drawCtx.setLineDash([]);
         return;
     }
-    // v25: Door rendering
+    // v26: Door rendering
     if(el.type === 'door'){
         if(!el.points || el.points.length < 2) return;
         drawCtx.strokeStyle = '#facc15';
@@ -1189,7 +1396,7 @@ function clearAll(){
     redraw();
 }
 
-// v25: Clear only auto-detected elements (keep what user drew manually)
+// v26: Clear only auto-detected elements (keep what user drew manually)
 function clearDetectedOnly(){
     const before = elements.length;
     elements = elements.filter(el => !el.detected);
@@ -1202,7 +1409,7 @@ function clearDetectedOnly(){
     redraw();
 }
 
-// v25: Snap walls - align almost-straight walls to perfect H/V and merge close ones
+// v26: Snap walls - align almost-straight walls to perfect H/V and merge close ones
 function snapWalls(){
     const SNAP_ANGLE_DEG = 8;
     const MERGE_DIST = 12;
@@ -1296,7 +1503,7 @@ async function generate(){
 
 
 RESULT_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Graphic v25</title>
+<html><head><title>BAS Graphic v26</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:12px;}
@@ -1314,7 +1521,7 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 .btn-gray{background:#252a38;color:#aab0c4;}
 .footer{text-align:center;color:#3a4060;font-size:11px;margin-top:10px;}
 </style></head><body>
-<h1>Synchrony BAS Graphic v25</h1>
+<h1>Synchrony BAS Graphic v26</h1>
 <p class="sub">Top-down aerial projection - Ready for Tracer Synchrony / Niagara</p>
 <div class="stats">
 <div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
@@ -1336,7 +1543,7 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 <script>
 const data = {{ detection_json | safe }};
 
-// === TOP-DOWN AERIAL CABINET PROJECTION (v25) ===
+// === TOP-DOWN AERIAL CABINET PROJECTION (v26) ===
 // True cabinet projection from above: floor compressed Y but kept large,
 // walls extruded vertically with subtle perspective.
 // Much more "looking down at the building" feel.
@@ -1403,7 +1610,7 @@ function generateSVG(){
     svg += `<rect width="${svgW}" height="${svgH}" fill="#0a0a0d"/>`;
     svg += `<defs>`;
 
-    // === FLOOR PATTERN v25 - subtle grid with soft lighting ===
+    // === FLOOR PATTERN v26 - subtle grid with soft lighting ===
     svg += `<pattern id="floorGrid" width="48" height="34" patternUnits="userSpaceOnUse">`;
     svg += `<rect width="48" height="34" fill="#e2e2e6"/>`;
     svg += `<path d="M 0 0 L 48 0 M 0 0 L 0 34" stroke="#c8c8cc" stroke-width="0.5" opacity="0.6"/>`;
@@ -1415,14 +1622,14 @@ function generateSVG(){
     svg += `<stop offset="100%" stop-color="#000000" stop-opacity="0.12"/>`;
     svg += `</radialGradient>`;
 
-    // === WALL GRADIENTS v25 - darker outer, AO shading ===
+    // === WALL GRADIENTS v26 - darker outer, AO shading ===
     svg += `<linearGradient id="extSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#b8b8be"/><stop offset="100%" stop-color="#7a7a80"/></linearGradient>`;
     svg += `<linearGradient id="extTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#dcdce0"/><stop offset="100%" stop-color="#a8a8ac"/></linearGradient>`;
     svg += `<linearGradient id="intSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#c8c8cc"/><stop offset="100%" stop-color="#9a9aa0"/></linearGradient>`;
     svg += `<linearGradient id="intTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#e2e2e6"/><stop offset="100%" stop-color="#b8b8bc"/></linearGradient>`;
     svg += `<linearGradient id="wallEnd" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#a8a8ad"/><stop offset="100%" stop-color="#86868c"/></linearGradient>`;
 
-    // === DUCT GRADIENTS v25 - cleaner white, more volumetric ===
+    // === DUCT GRADIENTS v26 - cleaner white, more volumetric ===
     svg += `<linearGradient id="ductTop" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#ffffff"/><stop offset="60%" stop-color="#f4f4f7"/><stop offset="100%" stop-color="#e0e0e4"/></linearGradient>`;
     svg += `<linearGradient id="ductSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#d8d8dc"/><stop offset="100%" stop-color="#a4a4a8"/></linearGradient>`;
 
@@ -1502,7 +1709,7 @@ function generateSVG(){
         }
     });
 
-    // v25: Render doors as short low walls (visible opening)
+    // v26: Render doors as short low walls (visible opening)
     elements.forEach(el => {
         if(el.type === 'door' && el.points && el.points.length === 2){
             const p1 = toLocal(el.points[0]);
@@ -1536,7 +1743,7 @@ function generateSVG(){
             const dx = p2.x - p1.x, dy = p2.y - p1.y;
             const len = Math.sqrt(dx*dx + dy*dy);
             if(len < 1) continue;
-            // v25: more consistent thickness, slightly chunkier for visibility
+            // v26: more consistent thickness, slightly chunkier for visibility
             const ductW = 16, ductH = 11;
             const nx = -dy / len * ductW / 2;
             const ny = dx / len * ductW / 2;
@@ -1745,7 +1952,12 @@ def upload():
                 stats = result["stats"]
                 n_walls = sum(1 for e in initial_elements if e.get("type") in ("extwall", "intwall"))
                 crop = stats.get("crop", (0, 0, 0, 0))
-                detected_message = f"Smart isolation: cropped to {crop[2]}x{crop[3]}. Detected {n_walls} walls + {stats.get('doors', 0)} doors from {stats['lines_raw']} raw lines. Review and adjust!"
+                detected_message = (
+                    f"v26 Semantic Filter: cropped {crop[2]}x{crop[3]}. "
+                    f"{stats['lines_raw']} raw -> {stats.get('after_thickness', 0)} thick "
+                    f"-> {stats.get('after_density', 0)} no-HVAC "
+                    f"-> {n_walls} final walls + {stats.get('doors', 0)} doors."
+                )
             else:
                 detected_message = "Detection ran but found nothing. Try Manual mode."
         except Exception as e:
