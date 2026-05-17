@@ -533,13 +533,23 @@ def render_floorplan_shape_base(clean_mask):
     offset_x = pad
     offset_y = pad + 38
 
+    # Exterior shell = only the outside band of the footprint. This avoids
+    # turning noisy interior mask blobs into full-height walls.
+    shell_kernel_size = max(9, int(max(h, w) * 0.010))
+    shell_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (shell_kernel_size, shell_kernel_size))
+    eroded_footprint = cv2.erode(footprint_clean, shell_kernel, iterations=1)
+    exterior_shell = cv2.subtract(footprint_clean, eroded_footprint)
+
     floor_proj = _warp_mask_to_aerial(footprint_clean, canvas_size, offset_x, offset_y, skew, y_scale)
+    shell_proj = _warp_mask_to_aerial(exterior_shell, canvas_size, offset_x, offset_y, skew, y_scale)
     visual_walls = _extract_visual_wall_lines(wall_mask)
     if np.count_nonzero(visual_walls) < max(100, int(np.count_nonzero(wall_mask) * 0.05)):
         visual_walls = wall_mask
 
-    walls_proj = _warp_mask_to_aerial(visual_walls, canvas_size, offset_x, offset_y, skew, y_scale)
-    walls_proj = cv2.dilate(walls_proj, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
+    interior_walls = cv2.bitwise_and(visual_walls, cv2.bitwise_not(cv2.dilate(exterior_shell, shell_kernel, iterations=1)))
+    interior_proj = _warp_mask_to_aerial(interior_walls, canvas_size, offset_x, offset_y, skew, y_scale)
+    interior_proj = cv2.dilate(interior_proj, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)), iterations=1)
+    shell_proj = cv2.dilate(shell_proj, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
 
     canvas = np.full((out_h, out_w, 3), 248, dtype=np.uint8)
 
@@ -564,18 +574,29 @@ def render_floorplan_shape_base(clean_mask):
     edge_contours, _ = cv2.findContours(floor_proj, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(canvas, edge_contours, -1, (118, 128, 145), 2, lineType=cv2.LINE_AA)
 
-    # Wall side/extrusion.
+    # Exterior shell: taller extrusion, like the visible outside walls in BAS graphics.
     wall_height = 30
     for z in range(0, wall_height + 1, 3):
-        shifted = _shift_mask(walls_proj, 0, -z)
+        shifted = _shift_mask(shell_proj, 0, -z)
         tone = 168 + int(45 * (z / max(wall_height, 1)))
         canvas[shifted > 0] = [tone, tone, min(245, tone + 8)]
 
-    wall_top = _shift_mask(walls_proj, 0, -wall_height)
+    wall_top = _shift_mask(shell_proj, 0, -wall_height)
     wall_top = cv2.dilate(wall_top, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)), iterations=1)
     canvas[wall_top > 0] = [246, 246, 250]
     wall_edges = cv2.Canny(wall_top, 50, 150)
     canvas[wall_edges > 0] = [130, 132, 140]
+
+    # Interior walls: lower, cleaner raised strokes instead of chunky blocks.
+    interior_height = 12
+    for z in range(0, interior_height + 1, 4):
+        shifted = _shift_mask(interior_proj, 0, -z)
+        tone = 178 + int(34 * (z / max(interior_height, 1)))
+        canvas[shifted > 0] = [tone, tone, min(242, tone + 6)]
+    interior_top = _shift_mask(interior_proj, 0, -interior_height)
+    canvas[interior_top > 0] = [239, 239, 242]
+    interior_edges = cv2.Canny(interior_top, 50, 150)
+    canvas[interior_edges > 0] = [150, 150, 158]
 
     return canvas
 
@@ -1467,11 +1488,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v31.1 <span class="badge">CLEANER WALL BASE</span></h1>
+<h1>BAS Generator v31.2 <span class="badge">EXTERIOR SHELL BASE</span></h1>
 <p class="sub">Smart trace + clean floorplan shape workflow</p>
 
 <div class="tip">
-<b>v31.1 NEW:</b> Floorplan Base now separates the floor footprint from long visual wall lines.
+<b>v31.2 NEW:</b> Floorplan Base extrudes the exterior shell and keeps interior walls lower/cleaner.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1491,7 +1512,7 @@ Auto-Detect Colors
 <small>Detects HVAC if pre-marked</small>
 </button>
 <button type="button" class="option-btn" id="maskBtn" onclick="setMode('mask')" style="border:2px solid #22d3ee;">
-&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v31.1</span>
+&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v31.2</span>
 <small>Mask first, then Floorplan Base</small>
 </button>
 </div>
@@ -1556,7 +1577,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 
 <div class="head">
 <div>
-<h1>&#10024; Architectural Mask Preview <span class="badge">v30.3</span></h1>
+<h1>&#10024; Architectural Mask Preview <span class="badge">v31.2</span></h1>
 <div class="sub">Compare original vs. clean architectural mask before editing</div>
 </div>
 <div class="actions">
@@ -1621,7 +1642,7 @@ body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;mi
 <div class="wrap">
 <div class="head">
 <div>
-<h1>Floorplan Shape Base <span class="badge">v31.1 preview</span></h1>
+<h1>Floorplan Shape Base <span class="badge">v31.2 preview</span></h1>
 <div class="sub">First visual pass: same floorplan shape, cleaner BAS-style base</div>
 </div>
 <div class="actions">
