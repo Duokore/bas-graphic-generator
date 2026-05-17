@@ -38,7 +38,7 @@ def pdf_to_png(pdf_path, out_path):
 
 
 # ============================================================
-# SMART FLOORPLAN ISOLATION (v27 NEW)
+# SMART FLOORPLAN ISOLATION (v28 NEW)
 # ============================================================
 
 def smart_isolate_floorplan(img):
@@ -552,7 +552,7 @@ def reconstruct_rooms_perimeter(lines, img_shape):
 
 
 def chain_walls_by_endpoints(lines, endpoint_tolerance=20):
-    """v27: Connect walls whose endpoints are very close.
+    """v28: Connect walls whose endpoints are very close.
     Merges chains of collinear walls that have small gaps."""
     if not lines:
         return []
@@ -595,9 +595,9 @@ def chain_walls_by_endpoints(lines, endpoint_tolerance=20):
     return chained
 
 
-def detect_main_corridor(lines, img_shape, min_length_ratio=0.4):
-    """v27: Identify the main horizontal/vertical corridor spine.
-    A corridor is two long parallel walls relatively close together that span much of the building."""
+def detect_main_corridor(lines, img_shape, min_length_ratio=0.3):
+    """v28: Identify the main horizontal/vertical corridor spine.
+    v28: Less strict ratio (30%) and gap range (30-300px)."""
     h, w = img_shape[:2]
     if not lines:
         return None
@@ -608,25 +608,25 @@ def detect_main_corridor(lines, img_shape, min_length_ratio=0.4):
     best_corridor = None
     best_score = 0
 
-    # Look for horizontal corridor (two long parallel H lines forming a corridor)
+    # Look for horizontal corridor - v28: take top 12 lines, allow shorter corridors
     min_len_h = w * min_length_ratio
-    for i, l1 in enumerate(horizontal[:8]):
+    for i, l1 in enumerate(horizontal[:12]):
         len1 = l1[2] - l1[0]
         if len1 < min_len_h:
             continue
-        for l2 in horizontal[i+1:8]:
+        for l2 in horizontal[i+1:12]:
             len2 = l2[2] - l2[0]
             if len2 < min_len_h:
                 continue
             gap = abs(l1[1] - l2[1])
-            # Corridor width is usually 60-200 px on these plans
-            if 40 < gap < 250:
-                # Check x overlap
+            # v28: wider corridor gap range (30-300 px)
+            if 30 < gap < 300:
                 ox1 = max(l1[0], l2[0])
                 ox2 = min(l1[2], l2[2])
                 overlap = ox2 - ox1
-                if overlap > w * 0.3:
-                    score = overlap - gap * 2  # prefer long & narrow
+                # v28: 25% overlap instead of 30%
+                if overlap > w * 0.25:
+                    score = overlap - gap * 1.5
                     if score > best_score:
                         best_score = score
                         y_top = min(l1[1], l2[1])
@@ -640,21 +640,21 @@ def detect_main_corridor(lines, img_shape, min_length_ratio=0.4):
 
     # Look for vertical corridor
     min_len_v = h * min_length_ratio
-    for i, l1 in enumerate(vertical[:8]):
+    for i, l1 in enumerate(vertical[:12]):
         len1 = l1[3] - l1[1]
         if len1 < min_len_v:
             continue
-        for l2 in vertical[i+1:8]:
+        for l2 in vertical[i+1:12]:
             len2 = l2[3] - l2[1]
             if len2 < min_len_v:
                 continue
             gap = abs(l1[0] - l2[0])
-            if 40 < gap < 250:
+            if 30 < gap < 300:
                 oy1 = max(l1[1], l2[1])
                 oy2 = min(l1[3], l2[3])
                 overlap = oy2 - oy1
-                if overlap > h * 0.3:
-                    score = overlap - gap * 2
+                if overlap > h * 0.25:
+                    score = overlap - gap * 1.5
                     if score > best_score:
                         best_score = score
                         x_left = min(l1[0], l2[0])
@@ -670,7 +670,7 @@ def detect_main_corridor(lines, img_shape, min_length_ratio=0.4):
 
 
 def segment_rooms_via_floodfill(walls, img_shape, min_room_area=2000):
-    """v27: Use flood fill to find enclosed rooms.
+    """v28: Use flood fill to find enclosed rooms.
     Returns list of room bounding boxes."""
     h, w = img_shape[:2]
     if not walls:
@@ -719,7 +719,7 @@ def segment_rooms_via_floodfill(walls, img_shape, min_room_area=2000):
 
 
 def reconstruct_perimeter_from_rooms(rooms):
-    """v27: Build the building outer footprint from the union of detected rooms.
+    """v28: Build the building outer footprint from the union of detected rooms.
     Returns a simple bounding polygon (axis-aligned)."""
     if not rooms:
         return None
@@ -738,7 +738,7 @@ def reconstruct_perimeter_from_rooms(rooms):
 
 
 def detect_architecture(image_path):
-    """v27: Architectural reconstruction - balanced filtering + corridor + rooms + chaining."""
+    """v28: Architectural reconstruction - balanced filtering + corridor + rooms + chaining."""
     img = cv2.imread(image_path)
     if img is None:
         return None
@@ -776,13 +776,13 @@ def detect_architecture(image_path):
     # === STEP 5: First merge collinear ===
     merged = merge_collinear_lines(snapped, distance_threshold=18)
 
-    # === STEP 6 (v27 REBALANCED): Length filter - MIN 60 (was 80) ===
+    # === STEP 6 (v28 REBALANCED): Length filter - MIN 60 (was 80) ===
     merged = [l for l in merged if math.hypot(l[2] - l[0], l[3] - l[1]) > 60]
 
-    # === STEP 7 (v27 REBALANCED): Thickness filter - MIN 2 (was 3) ===
+    # === STEP 7 (v28 REBALANCED): Thickness filter - MIN 2 (was 3) ===
     thick_lines = filter_lines_by_thickness(merged, binary_full, min_thickness=2)
 
-    # === STEP 8 (v27 REBALANCED): Density - MAX 8 per cell (was 5) ===
+    # === STEP 8 (v28 REBALANCED): Density - MAX 8 per cell (was 5) ===
     after_density = filter_dense_zones(thick_lines, (img_h, img_w),
                                         cell_size=70, max_lines_per_cell=8)
 
@@ -793,19 +793,21 @@ def detect_architecture(image_path):
     after_merge2 = merge_collinear_lines(after_dims, distance_threshold=35)
     n_filtered = len(after_merge2)
 
-    # === STEP 11 (v27 NEW): Chain walls by endpoints ===
-    chained_walls = chain_walls_by_endpoints(after_merge2, endpoint_tolerance=20)
+    # === STEP 11 (v28 NEW): Chain walls by endpoints ===
+    # v28: Slightly more permissive chaining (25px instead of 20)
+    chained_walls = chain_walls_by_endpoints(after_merge2, endpoint_tolerance=25)
     n_chained = len(chained_walls)
 
-    # === STEP 12 (v27 NEW): Detect main corridor ===
+    # === STEP 12 (v28 NEW): Detect main corridor ===
     corridor = detect_main_corridor(chained_walls, (img_h, img_w))
     corridor_label = corridor["orientation"] if corridor else "none"
 
-    # === STEP 13 (v27 NEW): Room segmentation via flood fill ===
-    rooms = segment_rooms_via_floodfill(chained_walls, (img_h, img_w), min_room_area=2500)
+    # === STEP 13 (v28 NEW): Room segmentation via flood fill ===
+    # v28: Lower min area (1500 instead of 2500) to catch more small rooms
+    rooms = segment_rooms_via_floodfill(chained_walls, (img_h, img_w), min_room_area=1500)
     n_rooms = len(rooms)
 
-    # === STEP 14 (v27 NEW): Reconstruct perimeter from rooms ===
+    # === STEP 14 (v28 NEW): Reconstruct perimeter from rooms ===
     ext_polygon = None
     if rooms:
         ext_polygon = reconstruct_perimeter_from_rooms(rooms)
@@ -959,7 +961,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 </style></head><body>
 <div class="card">
 <div class="logo">&#128274;</div>
-<h1>BAS Generator v27</h1>
+<h1>BAS Generator v28</h1>
 <p class="sub">Private Access</p>
 <form method="POST" action="/login">
 <input type="password" name="password" placeholder="Enter password" required autofocus>
@@ -971,7 +973,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 
 
 HOME_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Generator v27</title>
+<html><head><title>BAS Generator v28</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
@@ -999,11 +1001,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v27 <span class="badge">ARCH RECONSTRUCT</span></h1>
-<p class="sub">Auto-detect building floorplan + HVAC</p>
+<h1>BAS Generator v28 <span class="badge">PRO EDITOR</span></h1>
+<p class="sub">Auto-detect floorplan + fast correction workflow</p>
 
 <div class="tip">
-<b>v27 NEW:</b> Corridor detection + Room segmentation + Wall chaining. Believable architecture, not floating lines!
+<b>v28 NEW:</b> Drag wall endpoints. Shift+click multi-select. Align H/V. Ctrl+D duplicate. Faster corrections!
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1053,7 +1055,7 @@ function setMode(mode){
 
 
 EDITOR_PAGE = '''<!DOCTYPE html>
-<html><head><title>CAD Editor v27</title>
+<html><head><title>CAD Editor v28</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:8px;height:100vh;display:flex;flex-direction:column;overflow:hidden;}
@@ -1090,9 +1092,12 @@ canvas{display:block;}
 {% endif %}
 
 <div class="topbar">
-<h1>CAD Editor v27</h1>
-<div style="display:flex;gap:6px;">
+<h1>CAD Editor v28</h1>
+<div style="display:flex;gap:6px;flex-wrap:wrap;">
 <button onclick="undo()" class="action-btn btn-gray">&#8617; Undo</button>
+<button onclick="alignSelected('h')" class="action-btn btn-blue" title="Align selected walls horizontal">&#8596; Align H</button>
+<button onclick="alignSelected('v')" class="action-btn btn-blue" title="Align selected walls vertical">&#8597; Align V</button>
+<button onclick="duplicateSelected()" class="action-btn btn-gray" title="Duplicate selected (Ctrl+D)">&#x2398; Duplicate</button>
 <button onclick="clearDetectedOnly()" class="action-btn btn-orange">Clear Detected</button>
 <button onclick="snapWalls()" class="action-btn btn-blue">Snap Walls</button>
 <button onclick="clearAll()" class="action-btn btn-red">Clear All</button>
@@ -1166,10 +1171,14 @@ let currentPolyline = null;
 let hoverPoint = null;
 let selectedElement = null;
 let dragOffset = null;
-// v27: Rectangle eraser state
+// v28: Multi-select + endpoint drag
+let selectedSet = new Set();  // indices of multi-selected elements
+let draggedEndpoint = null;   // { elIdx, pointIdx, originalPos }
+let clipboard = [];           // for duplicate
+// v28: Rectangle eraser state
 let eraseRectStart = null;
 let eraseRectCurrent = null;
-// v27: Door state (2-click line)
+// v28: Door state (2-click line)
 let doorFirstPoint = null;
 
 const COLORS = {
@@ -1185,7 +1194,7 @@ const STATUS_TEXTS = {
     vav:'Click to place a VAV.',
     ahu:'Click to place the AHU.',
     diffuser:'Click to place a diffuser.',
-    move:'Click and drag any element to move it.',
+    move:'Drag wall ENDPOINTS to reshape. Shift+click to multi-select. Ctrl+D to duplicate.',
     delete:'Click any element to delete it.',
     door:'Click TWO points for a door opening on a wall.',
     erase_rect:'Click & drag to draw a rectangle - everything inside gets deleted.'
@@ -1213,7 +1222,7 @@ function selectTool(btn){
         currentPolyline = null;
         saveState();
     }
-    // v27: Reset new tool states
+    // v28: Reset new tool states
     eraseRectStart = null;
     eraseRectCurrent = null;
     doorFirstPoint = null;
@@ -1261,7 +1270,7 @@ drawCanvas.addEventListener('click', function(e){
         }
         redraw(); return;
     }
-    // v27: Door tool (2 clicks)
+    // v28: Door tool (2 clicks)
     if(currentTool === 'door'){
         if(!doorFirstPoint){
             doorFirstPoint = { x: pos.x, y: pos.y };
@@ -1292,6 +1301,30 @@ drawCanvas.addEventListener('dblclick', function(e){
 drawCanvas.addEventListener('mousemove', function(e){
     const pos = getMousePos(e);
     hoverPoint = pos;
+
+    // v28: Drag endpoint (priority)
+    if(currentTool === 'move' && draggedEndpoint){
+        const el = elements[draggedEndpoint.elIdx];
+        if(!el || !el.points) return;
+        const pt = el.points[draggedEndpoint.pointIdx];
+        // Snap to axis: if shift held, free; otherwise auto-snap if close to H or V
+        let nx = pos.x, ny = pos.y;
+        // Find the other endpoint of the same segment for axis snap hint
+        if(el.points.length >= 2){
+            const otherIdx = draggedEndpoint.pointIdx === 0 ? 1 : draggedEndpoint.pointIdx - 1;
+            const other = el.points[otherIdx];
+            const dx = Math.abs(nx - other.x);
+            const dy = Math.abs(ny - other.y);
+            // Auto-snap: if much closer to horizontal, lock Y
+            if(dx > dy * 2.5) ny = other.y;
+            else if(dy > dx * 2.5) nx = other.x;
+        }
+        pt.x = nx;
+        pt.y = ny;
+        redraw();
+        return;
+    }
+
     if(currentTool === 'move' && selectedElement && dragOffset){
         moveElement(selectedElement, pos.x - dragOffset.x, pos.y - dragOffset.y);
         const c = getElementCenter(selectedElement);
@@ -1299,7 +1332,6 @@ drawCanvas.addEventListener('mousemove', function(e){
         redraw();
         return;
     }
-    // v27: Rectangle eraser drag preview
     if(currentTool === 'erase_rect' && eraseRectStart){
         eraseRectCurrent = pos;
         redraw();
@@ -1310,23 +1342,61 @@ drawCanvas.addEventListener('mousemove', function(e){
 
 drawCanvas.addEventListener('mousedown', function(e){
     const pos = getMousePos(e);
-    // v27: Rectangle eraser start
+    // v28: Rectangle eraser start
     if(currentTool === 'erase_rect'){
         eraseRectStart = pos;
         eraseRectCurrent = pos;
         return;
     }
     if(currentTool !== 'move') return;
+
+    // v28: First check if user clicked on a wall ENDPOINT (priority over center)
+    const ep = findEndpointAt(pos, 12);
+    if(ep){
+        draggedEndpoint = ep;
+        return;
+    }
+
+    // Otherwise look for whole-element click
     const idx = findElementAt(pos);
     if(idx !== -1){
+        // v28: Shift+click for multi-select
+        if(e.shiftKey){
+            if(selectedSet.has(idx)) selectedSet.delete(idx);
+            else selectedSet.add(idx);
+            redraw();
+            return;
+        }
+        // Normal: clear multi-select, drag single
+        if(!selectedSet.has(idx)) selectedSet.clear();
         selectedElement = elements[idx];
         const c = getElementCenter(selectedElement);
         dragOffset = { x: pos.x - c.x, y: pos.y - c.y };
+    } else {
+        // Click on empty area - clear selection
+        selectedSet.clear();
+        redraw();
     }
 });
 
+// v28: Find a wall endpoint near a position
+function findEndpointAt(pos, threshold){
+    for(let i = elements.length - 1; i >= 0; i--){
+        const el = elements[i];
+        if(!el.points || el.type === 'branch') continue;
+        // Don't drag endpoints of closed extwall polygons (they're computed)
+        for(let j = 0; j < el.points.length; j++){
+            const p = el.points[j];
+            if(Math.hypot(pos.x - p.x, pos.y - p.y) < threshold){
+                return { elIdx: i, pointIdx: j };
+            }
+        }
+    }
+    return null;
+}
+
 drawCanvas.addEventListener('mouseup', function(e){
-    // v27: Rectangle eraser apply
+    // v28: Rectangle eraser apply
     if(currentTool === 'erase_rect' && eraseRectStart && eraseRectCurrent){
         const rx1 = Math.min(eraseRectStart.x, eraseRectCurrent.x);
         const ry1 = Math.min(eraseRectStart.y, eraseRectCurrent.y);
@@ -1337,6 +1407,30 @@ drawCanvas.addEventListener('mouseup', function(e){
         eraseRectStart = null;
         eraseRectCurrent = null;
         if(elements.length !== before) saveState();
+        redraw();
+        return;
+    }
+    // v28: Commit endpoint drag with snap-to-nearby
+    if(draggedEndpoint){
+        const el = elements[draggedEndpoint.elIdx];
+        if(el && el.points){
+            const pt = el.points[draggedEndpoint.pointIdx];
+            // Look for another wall endpoint within 15px to snap to
+            for(let ei = 0; ei < elements.length; ei++){
+                if(ei === draggedEndpoint.elIdx) continue;
+                const other = elements[ei];
+                if(!other.points) continue;
+                for(const op of other.points){
+                    if(Math.hypot(pt.x - op.x, pt.y - op.y) < 15){
+                        pt.x = op.x;
+                        pt.y = op.y;
+                        break;
+                    }
+                }
+            }
+        }
+        draggedEndpoint = null;
+        saveState();
         redraw();
         return;
     }
@@ -1361,8 +1455,86 @@ document.addEventListener('keydown', function(e){
         if(currentPolyline){ currentPolyline = null; redraw(); }
         if(doorFirstPoint){ doorFirstPoint = null; redraw(); }
         if(eraseRectStart){ eraseRectStart = null; eraseRectCurrent = null; redraw(); }
+        // v28: Escape clears multi-selection
+        if(selectedSet.size > 0){ selectedSet.clear(); redraw(); }
+    }
+    // v28: Ctrl+D duplicates selection
+    if((e.ctrlKey || e.metaKey) && e.key === 'd'){
+        e.preventDefault();
+        duplicateSelected();
+    }
+    // v28: Delete key removes multi-selection
+    if((e.key === 'Delete' || e.key === 'Backspace') && selectedSet.size > 0){
+        e.preventDefault();
+        const indices = Array.from(selectedSet).sort((a,b) => b - a);
+        for(const idx of indices) elements.splice(idx, 1);
+        selectedSet.clear();
+        saveState();
+        redraw();
     }
 });
+
+// v28: Align selected walls to horizontal or vertical
+function alignSelected(orientation){
+    if(selectedSet.size === 0){
+        alert('Shift+click walls to select them first, then click Align.');
+        return;
+    }
+    let changes = 0;
+    for(const idx of selectedSet){
+        const el = elements[idx];
+        if(!el || !el.points || el.points.length < 2) continue;
+        if(el.type !== 'extwall' && el.type !== 'intwall' && el.type !== 'duct') continue;
+        for(let i = 0; i < el.points.length - 1; i++){
+            const p1 = el.points[i];
+            const p2 = el.points[i+1];
+            if(orientation === 'h'){
+                const yAvg = (p1.y + p2.y) / 2;
+                p1.y = yAvg; p2.y = yAvg;
+            } else {
+                const xAvg = (p1.x + p2.x) / 2;
+                p1.x = xAvg; p2.x = xAvg;
+            }
+            changes++;
+        }
+    }
+    if(changes > 0){
+        saveState();
+        redraw();
+        document.getElementById('statusBar').textContent = `Aligned ${changes} segments to ${orientation.toUpperCase()}.`;
+    }
+}
+
+// v28: Duplicate selected elements (offset 30px right+down)
+function duplicateSelected(){
+    if(selectedSet.size === 0){
+        alert('Shift+click elements to select them first.');
+        return;
+    }
+    const offsetX = 30, offsetY = 30;
+    const newIndices = new Set();
+    for(const idx of selectedSet){
+        const el = elements[idx];
+        if(!el) continue;
+        const copy = JSON.parse(JSON.stringify(el));
+        delete copy.detected;  // Cloned elements are user-made
+        if(copy.type === 'vav' || copy.type === 'ahu' || copy.type === 'diffuser'){
+            copy.x += offsetX;
+            copy.y += offsetY;
+        } else if(copy.points){
+            for(const p of copy.points){
+                p.x += offsetX;
+                p.y += offsetY;
+            }
+        }
+        elements.push(copy);
+        newIndices.add(elements.length - 1);
+    }
+    selectedSet = newIndices;  // Select the new copies
+    saveState();
+    redraw();
+    document.getElementById('statusBar').textContent = `Duplicated ${newIndices.size} elements.`;
+}
 
 function findElementAt(pos){
     for(let i = elements.length - 1; i >= 0; i--){
@@ -1430,7 +1602,24 @@ function nearestPointOnSegment(p, a, b){
 
 function redraw(){
     drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-    for(const el of elements) drawElement(el);
+    for(let i = 0; i < elements.length; i++){
+        drawElement(elements[i], false, i);
+    }
+    // v28: Draw endpoint handles when in Move mode
+    if(currentTool === 'move'){
+        drawCtx.fillStyle = '#00ffaa';
+        drawCtx.strokeStyle = '#fff';
+        drawCtx.lineWidth = 1.5;
+        for(const el of elements){
+            if(!el.points || el.type === 'branch') continue;
+            for(const p of el.points){
+                drawCtx.beginPath();
+                drawCtx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+                drawCtx.fill();
+                drawCtx.stroke();
+            }
+        }
+    }
     if(currentPolyline){
         drawElement(currentPolyline, true);
         if(hoverPoint && currentPolyline.points && currentPolyline.points.length > 0){
@@ -1445,7 +1634,7 @@ function redraw(){
             drawCtx.setLineDash([]);
         }
     }
-    // v27: Door preview after first click
+    // v28: Door preview after first click
     if(doorFirstPoint && hoverPoint){
         drawCtx.fillStyle = '#facc15';
         drawCtx.beginPath();
@@ -1460,7 +1649,7 @@ function redraw(){
         drawCtx.stroke();
         drawCtx.setLineDash([]);
     }
-    // v27: Rectangle eraser preview
+    // v28: Rectangle eraser preview
     if(eraseRectStart && eraseRectCurrent){
         const x = Math.min(eraseRectStart.x, eraseRectCurrent.x);
         const y = Math.min(eraseRectStart.y, eraseRectCurrent.y);
@@ -1476,9 +1665,33 @@ function redraw(){
     }
 }
 
-function drawElement(el, inProgress = false){
+function drawElement(el, inProgress = false, elIdx = -1){
     const color = COLORS[el.type] || '#fff';
     const detectedAlpha = el.detected ? 0.7 : 1.0;
+    const isSelected = elIdx >= 0 && selectedSet.has(elIdx);
+
+    // v28: Draw selection halo behind the element
+    if(isSelected){
+        drawCtx.save();
+        drawCtx.shadowColor = '#00d4ff';
+        drawCtx.shadowBlur = 12;
+        drawCtx.strokeStyle = '#00d4ff';
+        drawCtx.lineWidth = 8;
+        drawCtx.globalAlpha = 0.5;
+        if(el.type === 'vav' || el.type === 'ahu' || el.type === 'diffuser'){
+            drawCtx.beginPath();
+            drawCtx.arc(el.x, el.y, 18, 0, Math.PI * 2);
+            drawCtx.stroke();
+        } else if(el.points && el.points.length > 0){
+            drawCtx.beginPath();
+            drawCtx.moveTo(el.points[0].x, el.points[0].y);
+            for(let i = 1; i < el.points.length; i++){
+                drawCtx.lineTo(el.points[i].x, el.points[i].y);
+            }
+            drawCtx.stroke();
+        }
+        drawCtx.restore();
+    }
 
     if(el.type === 'vav'){
         drawCtx.fillStyle = color;
@@ -1518,7 +1731,7 @@ function drawElement(el, inProgress = false){
         drawCtx.setLineDash([]);
         return;
     }
-    // v27: Door rendering
+    // v28: Door rendering
     if(el.type === 'door'){
         if(!el.points || el.points.length < 2) return;
         drawCtx.strokeStyle = '#facc15';
@@ -1581,6 +1794,7 @@ function undo(){
     history.pop();
     elements = JSON.parse(history[history.length - 1]);
     currentPolyline = null;
+    selectedSet.clear();  // v28
     redraw();
 }
 
@@ -1588,11 +1802,12 @@ function clearAll(){
     if(!confirm('Clear everything?')) return;
     elements = [];
     currentPolyline = null;
+    selectedSet.clear();  // v28
     saveState();
     redraw();
 }
 
-// v27: Clear only auto-detected elements (keep what user drew manually)
+// v28: Clear only auto-detected elements (keep what user drew manually)
 function clearDetectedOnly(){
     const before = elements.length;
     elements = elements.filter(el => !el.detected);
@@ -1605,7 +1820,7 @@ function clearDetectedOnly(){
     redraw();
 }
 
-// v27: Snap walls - align almost-straight walls to perfect H/V and merge close ones
+// v28: Snap walls - align almost-straight walls to perfect H/V and merge close ones
 function snapWalls(){
     const SNAP_ANGLE_DEG = 8;
     const MERGE_DIST = 12;
@@ -1699,7 +1914,7 @@ async function generate(){
 
 
 RESULT_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Graphic v27</title>
+<html><head><title>BAS Graphic v28</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:12px;}
@@ -1717,7 +1932,7 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 .btn-gray{background:#252a38;color:#aab0c4;}
 .footer{text-align:center;color:#3a4060;font-size:11px;margin-top:10px;}
 </style></head><body>
-<h1>Synchrony BAS Graphic v27</h1>
+<h1>Synchrony BAS Graphic v28</h1>
 <p class="sub">Top-down aerial projection - Ready for Tracer Synchrony / Niagara</p>
 <div class="stats">
 <div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
@@ -1739,7 +1954,7 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 <script>
 const data = {{ detection_json | safe }};
 
-// === TOP-DOWN AERIAL CABINET PROJECTION (v27) ===
+// === TOP-DOWN AERIAL CABINET PROJECTION (v28) ===
 // True cabinet projection from above: floor compressed Y but kept large,
 // walls extruded vertically with subtle perspective.
 // Much more "looking down at the building" feel.
@@ -1806,7 +2021,7 @@ function generateSVG(){
     svg += `<rect width="${svgW}" height="${svgH}" fill="#0a0a0d"/>`;
     svg += `<defs>`;
 
-    // === FLOOR PATTERN v27 - subtle grid with soft lighting ===
+    // === FLOOR PATTERN v28 - subtle grid with soft lighting ===
     svg += `<pattern id="floorGrid" width="48" height="34" patternUnits="userSpaceOnUse">`;
     svg += `<rect width="48" height="34" fill="#e2e2e6"/>`;
     svg += `<path d="M 0 0 L 48 0 M 0 0 L 0 34" stroke="#c8c8cc" stroke-width="0.5" opacity="0.6"/>`;
@@ -1818,14 +2033,14 @@ function generateSVG(){
     svg += `<stop offset="100%" stop-color="#000000" stop-opacity="0.12"/>`;
     svg += `</radialGradient>`;
 
-    // === WALL GRADIENTS v27 - darker outer, AO shading ===
+    // === WALL GRADIENTS v28 - darker outer, AO shading ===
     svg += `<linearGradient id="extSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#b8b8be"/><stop offset="100%" stop-color="#7a7a80"/></linearGradient>`;
     svg += `<linearGradient id="extTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#dcdce0"/><stop offset="100%" stop-color="#a8a8ac"/></linearGradient>`;
     svg += `<linearGradient id="intSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#c8c8cc"/><stop offset="100%" stop-color="#9a9aa0"/></linearGradient>`;
     svg += `<linearGradient id="intTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#e2e2e6"/><stop offset="100%" stop-color="#b8b8bc"/></linearGradient>`;
     svg += `<linearGradient id="wallEnd" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#a8a8ad"/><stop offset="100%" stop-color="#86868c"/></linearGradient>`;
 
-    // === DUCT GRADIENTS v27 - cleaner white, more volumetric ===
+    // === DUCT GRADIENTS v28 - cleaner white, more volumetric ===
     svg += `<linearGradient id="ductTop" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#ffffff"/><stop offset="60%" stop-color="#f4f4f7"/><stop offset="100%" stop-color="#e0e0e4"/></linearGradient>`;
     svg += `<linearGradient id="ductSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#d8d8dc"/><stop offset="100%" stop-color="#a4a4a8"/></linearGradient>`;
 
@@ -1872,7 +2087,7 @@ function generateSVG(){
         const p1b = { x: p1.x - nx, y: p1.y - ny };
         const p2a = { x: p2.x + nx, y: p2.y + ny };
         const p2b = { x: p2.x - nx, y: p2.y - ny };
-        // v27 FIX: Walls start slightly BELOW floor (z = -2) to eliminate gap
+        // v28 FIX: Walls start slightly BELOW floor (z = -2) to eliminate gap
         const BASE_Z = -2;
         const [b1ax, b1ay] = projSVG(p1a.x, p1a.y, BASE_Z);
         const [b1bx, b1by] = projSVG(p1b.x, p1b.y, BASE_Z);
@@ -1907,7 +2122,7 @@ function generateSVG(){
         }
     });
 
-    // v27: Render doors as short low walls (visible opening)
+    // v28: Render doors as short low walls (visible opening)
     elements.forEach(el => {
         if(el.type === 'door' && el.points && el.points.length === 2){
             const p1 = toLocal(el.points[0]);
@@ -1941,7 +2156,7 @@ function generateSVG(){
             const dx = p2.x - p1.x, dy = p2.y - p1.y;
             const len = Math.sqrt(dx*dx + dy*dy);
             if(len < 1) continue;
-            // v27: more consistent thickness, slightly chunkier for visibility
+            // v28: more consistent thickness, slightly chunkier for visibility
             const ductW = 16, ductH = 11;
             const nx = -dy / len * ductW / 2;
             const ny = dx / len * ductW / 2;
@@ -2151,7 +2366,7 @@ def upload():
                 n_walls = sum(1 for e in initial_elements if e.get("type") in ("extwall", "intwall"))
                 crop = stats.get("crop", (0, 0, 0, 0))
                 detected_message = (
-                    f"v27 Architectural Reconstruction: cropped {crop[2]}x{crop[3]}. "
+                    f"v28 Architectural Reconstruction: cropped {crop[2]}x{crop[3]}. "
                     f"{stats['lines_raw']} raw -> {stats.get('after_filter', 0)} filtered "
                     f"-> chained {stats.get('chained', 0)} | corridor: {stats.get('corridor', 'none')} "
                     f"| rooms: {stats.get('rooms', 0)} | walls: {stats.get('final_walls', n_walls)} "
