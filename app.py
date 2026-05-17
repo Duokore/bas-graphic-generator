@@ -38,7 +38,7 @@ def pdf_to_png(pdf_path, out_path):
 
 
 # ============================================================
-# SMART FLOORPLAN ISOLATION (v28 NEW)
+# SMART FLOORPLAN ISOLATION (v29 NEW)
 # ============================================================
 
 def smart_isolate_floorplan(img):
@@ -552,7 +552,7 @@ def reconstruct_rooms_perimeter(lines, img_shape):
 
 
 def chain_walls_by_endpoints(lines, endpoint_tolerance=20):
-    """v28: Connect walls whose endpoints are very close.
+    """v29: Connect walls whose endpoints are very close.
     Merges chains of collinear walls that have small gaps."""
     if not lines:
         return []
@@ -596,8 +596,8 @@ def chain_walls_by_endpoints(lines, endpoint_tolerance=20):
 
 
 def detect_main_corridor(lines, img_shape, min_length_ratio=0.3):
-    """v28: Identify the main horizontal/vertical corridor spine.
-    v28: Less strict ratio (30%) and gap range (30-300px)."""
+    """v29: Identify the main horizontal/vertical corridor spine.
+    v29: Less strict ratio (30%) and gap range (30-300px)."""
     h, w = img_shape[:2]
     if not lines:
         return None
@@ -608,7 +608,7 @@ def detect_main_corridor(lines, img_shape, min_length_ratio=0.3):
     best_corridor = None
     best_score = 0
 
-    # Look for horizontal corridor - v28: take top 12 lines, allow shorter corridors
+    # Look for horizontal corridor - v29: take top 12 lines, allow shorter corridors
     min_len_h = w * min_length_ratio
     for i, l1 in enumerate(horizontal[:12]):
         len1 = l1[2] - l1[0]
@@ -619,12 +619,12 @@ def detect_main_corridor(lines, img_shape, min_length_ratio=0.3):
             if len2 < min_len_h:
                 continue
             gap = abs(l1[1] - l2[1])
-            # v28: wider corridor gap range (30-300 px)
+            # v29: wider corridor gap range (30-300 px)
             if 30 < gap < 300:
                 ox1 = max(l1[0], l2[0])
                 ox2 = min(l1[2], l2[2])
                 overlap = ox2 - ox1
-                # v28: 25% overlap instead of 30%
+                # v29: 25% overlap instead of 30%
                 if overlap > w * 0.25:
                     score = overlap - gap * 1.5
                     if score > best_score:
@@ -670,7 +670,7 @@ def detect_main_corridor(lines, img_shape, min_length_ratio=0.3):
 
 
 def segment_rooms_via_floodfill(walls, img_shape, min_room_area=2000):
-    """v28: Use flood fill to find enclosed rooms.
+    """v29: Use flood fill to find enclosed rooms.
     Returns list of room bounding boxes."""
     h, w = img_shape[:2]
     if not walls:
@@ -719,7 +719,7 @@ def segment_rooms_via_floodfill(walls, img_shape, min_room_area=2000):
 
 
 def reconstruct_perimeter_from_rooms(rooms):
-    """v28: Build the building outer footprint from the union of detected rooms.
+    """v29: Build the building outer footprint from the union of detected rooms.
     Returns a simple bounding polygon (axis-aligned)."""
     if not rooms:
         return None
@@ -738,7 +738,7 @@ def reconstruct_perimeter_from_rooms(rooms):
 
 
 def detect_architecture(image_path):
-    """v28: Architectural reconstruction - balanced filtering + corridor + rooms + chaining."""
+    """v29: Architectural reconstruction - balanced filtering + corridor + rooms + chaining."""
     img = cv2.imread(image_path)
     if img is None:
         return None
@@ -776,13 +776,13 @@ def detect_architecture(image_path):
     # === STEP 5: First merge collinear ===
     merged = merge_collinear_lines(snapped, distance_threshold=18)
 
-    # === STEP 6 (v28 REBALANCED): Length filter - MIN 60 (was 80) ===
+    # === STEP 6 (v29 REBALANCED): Length filter - MIN 60 (was 80) ===
     merged = [l for l in merged if math.hypot(l[2] - l[0], l[3] - l[1]) > 60]
 
-    # === STEP 7 (v28 REBALANCED): Thickness filter - MIN 2 (was 3) ===
+    # === STEP 7 (v29 REBALANCED): Thickness filter - MIN 2 (was 3) ===
     thick_lines = filter_lines_by_thickness(merged, binary_full, min_thickness=2)
 
-    # === STEP 8 (v28 REBALANCED): Density - MAX 8 per cell (was 5) ===
+    # === STEP 8 (v29 REBALANCED): Density - MAX 8 per cell (was 5) ===
     after_density = filter_dense_zones(thick_lines, (img_h, img_w),
                                         cell_size=70, max_lines_per_cell=8)
 
@@ -793,21 +793,21 @@ def detect_architecture(image_path):
     after_merge2 = merge_collinear_lines(after_dims, distance_threshold=35)
     n_filtered = len(after_merge2)
 
-    # === STEP 11 (v28 NEW): Chain walls by endpoints ===
-    # v28: Slightly more permissive chaining (25px instead of 20)
+    # === STEP 11 (v29 NEW): Chain walls by endpoints ===
+    # v29: Slightly more permissive chaining (25px instead of 20)
     chained_walls = chain_walls_by_endpoints(after_merge2, endpoint_tolerance=25)
     n_chained = len(chained_walls)
 
-    # === STEP 12 (v28 NEW): Detect main corridor ===
+    # === STEP 12 (v29 NEW): Detect main corridor ===
     corridor = detect_main_corridor(chained_walls, (img_h, img_w))
     corridor_label = corridor["orientation"] if corridor else "none"
 
-    # === STEP 13 (v28 NEW): Room segmentation via flood fill ===
-    # v28: Lower min area (1500 instead of 2500) to catch more small rooms
+    # === STEP 13 (v29 NEW): Room segmentation via flood fill ===
+    # v29: Lower min area (1500 instead of 2500) to catch more small rooms
     rooms = segment_rooms_via_floodfill(chained_walls, (img_h, img_w), min_room_area=1500)
     n_rooms = len(rooms)
 
-    # === STEP 14 (v28 NEW): Reconstruct perimeter from rooms ===
+    # === STEP 14 (v29 NEW): Reconstruct perimeter from rooms ===
     ext_polygon = None
     if rooms:
         ext_polygon = reconstruct_perimeter_from_rooms(rooms)
@@ -961,7 +961,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 </style></head><body>
 <div class="card">
 <div class="logo">&#128274;</div>
-<h1>BAS Generator v28</h1>
+<h1>BAS Generator v29</h1>
 <p class="sub">Private Access</p>
 <form method="POST" action="/login">
 <input type="password" name="password" placeholder="Enter password" required autofocus>
@@ -973,7 +973,7 @@ button{width:100%;padding:15px;border:none;border-radius:12px;margin-top:18px;ba
 
 
 HOME_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Generator v28</title>
+<html><head><title>BAS Generator v29</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
@@ -1001,11 +1001,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v28 <span class="badge">PRO EDITOR</span></h1>
-<p class="sub">Auto-detect floorplan + fast correction workflow</p>
+<h1>BAS Generator v29 <span class="badge">UX POLISH</span></h1>
+<p class="sub">Auto-detect + ultra-fast correction workflow</p>
 
 <div class="tip">
-<b>v28 NEW:</b> Drag wall endpoints. Shift+click multi-select. Align H/V. Ctrl+D duplicate. Faster corrections!
+<b>v29 NEW:</b> Box-select drag, auto-extend on snap, SHIFT lock H/V, snap preview line. Fast editing!
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1055,7 +1055,7 @@ function setMode(mode){
 
 
 EDITOR_PAGE = '''<!DOCTYPE html>
-<html><head><title>CAD Editor v28</title>
+<html><head><title>CAD Editor v29</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:8px;height:100vh;display:flex;flex-direction:column;overflow:hidden;}
@@ -1092,7 +1092,7 @@ canvas{display:block;}
 {% endif %}
 
 <div class="topbar">
-<h1>CAD Editor v28</h1>
+<h1>CAD Editor v29</h1>
 <div style="display:flex;gap:6px;flex-wrap:wrap;">
 <button onclick="undo()" class="action-btn btn-gray">&#8617; Undo</button>
 <button onclick="alignSelected('h')" class="action-btn btn-blue" title="Align selected walls horizontal">&#8596; Align H</button>
@@ -1171,14 +1171,19 @@ let currentPolyline = null;
 let hoverPoint = null;
 let selectedElement = null;
 let dragOffset = null;
-// v28: Multi-select + endpoint drag
+// v29: Multi-select + endpoint drag
 let selectedSet = new Set();  // indices of multi-selected elements
 let draggedEndpoint = null;   // { elIdx, pointIdx, originalPos }
 let clipboard = [];           // for duplicate
-// v28: Rectangle eraser state
+// v29: Box-select + auto-extend
+let boxSelectStart = null;
+let boxSelectCurrent = null;
+let shiftHeld = false;
+let snapTarget = null;        // { x, y, type: 'endpoint'|'wall' } - shown as preview
+// v29: Rectangle eraser state
 let eraseRectStart = null;
 let eraseRectCurrent = null;
-// v28: Door state (2-click line)
+// v29: Door state (2-click line)
 let doorFirstPoint = null;
 
 const COLORS = {
@@ -1194,7 +1199,7 @@ const STATUS_TEXTS = {
     vav:'Click to place a VAV.',
     ahu:'Click to place the AHU.',
     diffuser:'Click to place a diffuser.',
-    move:'Drag wall ENDPOINTS to reshape. Shift+click to multi-select. Ctrl+D to duplicate.',
+    move:'Drag endpoints (SHIFT=lock H/V). Drag empty area=box-select. Snap preview shown.',
     delete:'Click any element to delete it.',
     door:'Click TWO points for a door opening on a wall.',
     erase_rect:'Click & drag to draw a rectangle - everything inside gets deleted.'
@@ -1222,7 +1227,7 @@ function selectTool(btn){
         currentPolyline = null;
         saveState();
     }
-    // v28: Reset new tool states
+    // v29: Reset new tool states
     eraseRectStart = null;
     eraseRectCurrent = null;
     doorFirstPoint = null;
@@ -1270,7 +1275,7 @@ drawCanvas.addEventListener('click', function(e){
         }
         redraw(); return;
     }
-    // v28: Door tool (2 clicks)
+    // v29: Door tool (2 clicks)
     if(currentTool === 'door'){
         if(!doorFirstPoint){
             doorFirstPoint = { x: pos.x, y: pos.y };
@@ -1302,25 +1307,67 @@ drawCanvas.addEventListener('mousemove', function(e){
     const pos = getMousePos(e);
     hoverPoint = pos;
 
-    // v28: Drag endpoint (priority)
+    // v29: Box-select drag
+    if(boxSelectStart){
+        boxSelectCurrent = pos;
+        redraw();
+        return;
+    }
+
+    // v29+v29: Drag endpoint (priority) with shift-lock and snap preview
     if(currentTool === 'move' && draggedEndpoint){
         const el = elements[draggedEndpoint.elIdx];
         if(!el || !el.points) return;
         const pt = el.points[draggedEndpoint.pointIdx];
-        // Snap to axis: if shift held, free; otherwise auto-snap if close to H or V
         let nx = pos.x, ny = pos.y;
-        // Find the other endpoint of the same segment for axis snap hint
+
+        // v29: SHIFT held = lock to perfect horizontal/vertical from "other" endpoint
         if(el.points.length >= 2){
             const otherIdx = draggedEndpoint.pointIdx === 0 ? 1 : draggedEndpoint.pointIdx - 1;
             const other = el.points[otherIdx];
-            const dx = Math.abs(nx - other.x);
-            const dy = Math.abs(ny - other.y);
-            // Auto-snap: if much closer to horizontal, lock Y
-            if(dx > dy * 2.5) ny = other.y;
-            else if(dy > dx * 2.5) nx = other.x;
+            if(shiftHeld){
+                // Hard lock: snap to H or V based on which axis is dominant
+                const dx = Math.abs(nx - other.x);
+                const dy = Math.abs(ny - other.y);
+                if(dx > dy) ny = other.y; else nx = other.x;
+            } else {
+                // Soft auto-snap (v29 behavior)
+                const dx = Math.abs(nx - other.x);
+                const dy = Math.abs(ny - other.y);
+                if(dx > dy * 2.5) ny = other.y;
+                else if(dy > dx * 2.5) nx = other.x;
+            }
         }
         pt.x = nx;
         pt.y = ny;
+
+        // v29: Find snap preview target (don't apply yet, just show)
+        snapTarget = null;
+        for(let ei = 0; ei < elements.length; ei++){
+            if(ei === draggedEndpoint.elIdx) continue;
+            const other = elements[ei];
+            if(!other.points) continue;
+            // Snap to endpoints first
+            for(const op of other.points){
+                if(Math.hypot(pt.x - op.x, pt.y - op.y) < 18){
+                    snapTarget = { x: op.x, y: op.y, type: 'endpoint' };
+                    break;
+                }
+            }
+            if(snapTarget) break;
+            // Then snap to walls (auto-extend)
+            for(let si = 0; si < other.points.length - 1; si++){
+                const a = other.points[si];
+                const b = other.points[si+1];
+                const proj = nearestPointOnSegment(pt, a, b);
+                if(Math.hypot(pt.x - proj.x, pt.y - proj.y) < 18){
+                    snapTarget = { x: proj.x, y: proj.y, type: 'wall' };
+                    break;
+                }
+            }
+            if(snapTarget) break;
+        }
+
         redraw();
         return;
     }
@@ -1342,7 +1389,7 @@ drawCanvas.addEventListener('mousemove', function(e){
 
 drawCanvas.addEventListener('mousedown', function(e){
     const pos = getMousePos(e);
-    // v28: Rectangle eraser start
+    // v29: Rectangle eraser start
     if(currentTool === 'erase_rect'){
         eraseRectStart = pos;
         eraseRectCurrent = pos;
@@ -1350,7 +1397,7 @@ drawCanvas.addEventListener('mousedown', function(e){
     }
     if(currentTool !== 'move') return;
 
-    // v28: First check if user clicked on a wall ENDPOINT (priority over center)
+    // v29: First check if user clicked on a wall ENDPOINT (priority over center)
     const ep = findEndpointAt(pos, 12);
     if(ep){
         draggedEndpoint = ep;
@@ -1360,7 +1407,7 @@ drawCanvas.addEventListener('mousedown', function(e){
     // Otherwise look for whole-element click
     const idx = findElementAt(pos);
     if(idx !== -1){
-        // v28: Shift+click for multi-select
+        // v29: Shift+click for multi-select
         if(e.shiftKey){
             if(selectedSet.has(idx)) selectedSet.delete(idx);
             else selectedSet.add(idx);
@@ -1373,13 +1420,15 @@ drawCanvas.addEventListener('mousedown', function(e){
         const c = getElementCenter(selectedElement);
         dragOffset = { x: pos.x - c.x, y: pos.y - c.y };
     } else {
-        // Click on empty area - clear selection
-        selectedSet.clear();
+        // v29: Empty-area click starts BOX SELECT (drag rectangle)
+        if(!e.shiftKey) selectedSet.clear();
+        boxSelectStart = pos;
+        boxSelectCurrent = pos;
         redraw();
     }
 });
 
-// v28: Find a wall endpoint near a position
+// v29: Find a wall endpoint near a position
 function findEndpointAt(pos, threshold){
     for(let i = elements.length - 1; i >= 0; i--){
         const el = elements[i];
@@ -1396,7 +1445,7 @@ function findEndpointAt(pos, threshold){
 }
 
 drawCanvas.addEventListener('mouseup', function(e){
-    // v28: Rectangle eraser apply
+    // v29: Rectangle eraser apply
     if(currentTool === 'erase_rect' && eraseRectStart && eraseRectCurrent){
         const rx1 = Math.min(eraseRectStart.x, eraseRectCurrent.x);
         const ry1 = Math.min(eraseRectStart.y, eraseRectCurrent.y);
@@ -1410,26 +1459,58 @@ drawCanvas.addEventListener('mouseup', function(e){
         redraw();
         return;
     }
-    // v28: Commit endpoint drag with snap-to-nearby
+    // v29: Box-select commit
+    if(boxSelectStart && boxSelectCurrent){
+        const dx = Math.abs(boxSelectCurrent.x - boxSelectStart.x);
+        const dy = Math.abs(boxSelectCurrent.y - boxSelectStart.y);
+        if(dx > 5 || dy > 5){
+            const rx1 = Math.min(boxSelectStart.x, boxSelectCurrent.x);
+            const ry1 = Math.min(boxSelectStart.y, boxSelectCurrent.y);
+            const rx2 = Math.max(boxSelectStart.x, boxSelectCurrent.x);
+            const ry2 = Math.max(boxSelectStart.y, boxSelectCurrent.y);
+            for(let i = 0; i < elements.length; i++){
+                if(elementIntersectsRect(elements[i], rx1, ry1, rx2, ry2)){
+                    selectedSet.add(i);
+                }
+            }
+            document.getElementById('statusBar').textContent =
+                `Selected ${selectedSet.size} elements. Align/Duplicate/Delete or Shift+drag for more.`;
+        }
+        boxSelectStart = null;
+        boxSelectCurrent = null;
+        redraw();
+        return;
+    }
+    // v29+v29: Commit endpoint drag using snapTarget (auto-extend)
     if(draggedEndpoint){
         const el = elements[draggedEndpoint.elIdx];
         if(el && el.points){
             const pt = el.points[draggedEndpoint.pointIdx];
-            // Look for another wall endpoint within 15px to snap to
-            for(let ei = 0; ei < elements.length; ei++){
-                if(ei === draggedEndpoint.elIdx) continue;
-                const other = elements[ei];
-                if(!other.points) continue;
-                for(const op of other.points){
-                    if(Math.hypot(pt.x - op.x, pt.y - op.y) < 15){
-                        pt.x = op.x;
-                        pt.y = op.y;
-                        break;
+            // v29: Use snapTarget (endpoint OR wall intersection) for auto-extend
+            if(snapTarget){
+                pt.x = snapTarget.x;
+                pt.y = snapTarget.y;
+            } else {
+                // Fallback: endpoint-only snap
+                for(let ei = 0; ei < elements.length; ei++){
+                    if(ei === draggedEndpoint.elIdx) continue;
+                    const other = elements[ei];
+                    if(!other.points) continue;
+                    let snapped = false;
+                    for(const op of other.points){
+                        if(Math.hypot(pt.x - op.x, pt.y - op.y) < 15){
+                            pt.x = op.x;
+                            pt.y = op.y;
+                            snapped = true;
+                            break;
+                        }
                     }
+                    if(snapped) break;
                 }
             }
         }
         draggedEndpoint = null;
+        snapTarget = null;
         saveState();
         redraw();
         return;
@@ -1451,19 +1532,21 @@ function elementIntersectsRect(el, x1, y1, x2, y2){
 }
 
 document.addEventListener('keydown', function(e){
+    // v29: Track Shift for axis lock during drag
+    if(e.key === 'Shift') shiftHeld = true;
     if(e.key === 'Escape'){
         if(currentPolyline){ currentPolyline = null; redraw(); }
         if(doorFirstPoint){ doorFirstPoint = null; redraw(); }
         if(eraseRectStart){ eraseRectStart = null; eraseRectCurrent = null; redraw(); }
-        // v28: Escape clears multi-selection
+        // v29: Escape clears multi-selection
         if(selectedSet.size > 0){ selectedSet.clear(); redraw(); }
     }
-    // v28: Ctrl+D duplicates selection
+    // v29: Ctrl+D duplicates selection
     if((e.ctrlKey || e.metaKey) && e.key === 'd'){
         e.preventDefault();
         duplicateSelected();
     }
-    // v28: Delete key removes multi-selection
+    // v29: Delete key removes multi-selection
     if((e.key === 'Delete' || e.key === 'Backspace') && selectedSet.size > 0){
         e.preventDefault();
         const indices = Array.from(selectedSet).sort((a,b) => b - a);
@@ -1474,7 +1557,12 @@ document.addEventListener('keydown', function(e){
     }
 });
 
-// v28: Align selected walls to horizontal or vertical
+// v29: Release Shift state
+document.addEventListener('keyup', function(e){
+    if(e.key === 'Shift') shiftHeld = false;
+});
+
+// v29: Align selected walls to horizontal or vertical
 function alignSelected(orientation){
     if(selectedSet.size === 0){
         alert('Shift+click walls to select them first, then click Align.');
@@ -1505,7 +1593,7 @@ function alignSelected(orientation){
     }
 }
 
-// v28: Duplicate selected elements (offset 30px right+down)
+// v29: Duplicate selected elements (offset 30px right+down)
 function duplicateSelected(){
     if(selectedSet.size === 0){
         alert('Shift+click elements to select them first.');
@@ -1605,7 +1693,7 @@ function redraw(){
     for(let i = 0; i < elements.length; i++){
         drawElement(elements[i], false, i);
     }
-    // v28: Draw endpoint handles when in Move mode
+    // v29: Draw endpoint handles when in Move mode
     if(currentTool === 'move'){
         drawCtx.fillStyle = '#00ffaa';
         drawCtx.strokeStyle = '#fff';
@@ -1634,7 +1722,7 @@ function redraw(){
             drawCtx.setLineDash([]);
         }
     }
-    // v28: Door preview after first click
+    // v29: Door preview after first click
     if(doorFirstPoint && hoverPoint){
         drawCtx.fillStyle = '#facc15';
         drawCtx.beginPath();
@@ -1649,7 +1737,7 @@ function redraw(){
         drawCtx.stroke();
         drawCtx.setLineDash([]);
     }
-    // v28: Rectangle eraser preview
+    // v29: Rectangle eraser preview
     if(eraseRectStart && eraseRectCurrent){
         const x = Math.min(eraseRectStart.x, eraseRectCurrent.x);
         const y = Math.min(eraseRectStart.y, eraseRectCurrent.y);
@@ -1663,6 +1751,47 @@ function redraw(){
         drawCtx.strokeRect(x, y, w, h);
         drawCtx.setLineDash([]);
     }
+    // v29: Box-select preview (cyan, distinct from red eraser)
+    if(boxSelectStart && boxSelectCurrent){
+        const x = Math.min(boxSelectStart.x, boxSelectCurrent.x);
+        const y = Math.min(boxSelectStart.y, boxSelectCurrent.y);
+        const w = Math.abs(boxSelectCurrent.x - boxSelectStart.x);
+        const h = Math.abs(boxSelectCurrent.y - boxSelectStart.y);
+        drawCtx.fillStyle = 'rgba(0, 212, 255, 0.15)';
+        drawCtx.fillRect(x, y, w, h);
+        drawCtx.strokeStyle = '#00d4ff';
+        drawCtx.lineWidth = 1.5;
+        drawCtx.setLineDash([6, 4]);
+        drawCtx.strokeRect(x, y, w, h);
+        drawCtx.setLineDash([]);
+    }
+    // v29: Snap target preview (cyan circle on snap point + dashed line from current pos)
+    if(snapTarget && draggedEndpoint){
+        const el = elements[draggedEndpoint.elIdx];
+        if(el && el.points){
+            const pt = el.points[draggedEndpoint.pointIdx];
+            // Dashed line from current endpoint to snap target
+            drawCtx.strokeStyle = '#00d4ff';
+            drawCtx.lineWidth = 2;
+            drawCtx.setLineDash([5, 4]);
+            drawCtx.beginPath();
+            drawCtx.moveTo(pt.x, pt.y);
+            drawCtx.lineTo(snapTarget.x, snapTarget.y);
+            drawCtx.stroke();
+            drawCtx.setLineDash([]);
+            // Big cyan ring on snap target
+            drawCtx.strokeStyle = '#00d4ff';
+            drawCtx.lineWidth = 2.5;
+            drawCtx.beginPath();
+            drawCtx.arc(snapTarget.x, snapTarget.y, 12, 0, Math.PI * 2);
+            drawCtx.stroke();
+            // Inner filled dot
+            drawCtx.fillStyle = snapTarget.type === 'endpoint' ? '#00ffaa' : '#facc15';
+            drawCtx.beginPath();
+            drawCtx.arc(snapTarget.x, snapTarget.y, 4, 0, Math.PI * 2);
+            drawCtx.fill();
+        }
+    }
 }
 
 function drawElement(el, inProgress = false, elIdx = -1){
@@ -1670,7 +1799,7 @@ function drawElement(el, inProgress = false, elIdx = -1){
     const detectedAlpha = el.detected ? 0.7 : 1.0;
     const isSelected = elIdx >= 0 && selectedSet.has(elIdx);
 
-    // v28: Draw selection halo behind the element
+    // v29: Draw selection halo behind the element
     if(isSelected){
         drawCtx.save();
         drawCtx.shadowColor = '#00d4ff';
@@ -1731,7 +1860,7 @@ function drawElement(el, inProgress = false, elIdx = -1){
         drawCtx.setLineDash([]);
         return;
     }
-    // v28: Door rendering
+    // v29: Door rendering
     if(el.type === 'door'){
         if(!el.points || el.points.length < 2) return;
         drawCtx.strokeStyle = '#facc15';
@@ -1794,7 +1923,7 @@ function undo(){
     history.pop();
     elements = JSON.parse(history[history.length - 1]);
     currentPolyline = null;
-    selectedSet.clear();  // v28
+    selectedSet.clear();  // v29
     redraw();
 }
 
@@ -1802,12 +1931,12 @@ function clearAll(){
     if(!confirm('Clear everything?')) return;
     elements = [];
     currentPolyline = null;
-    selectedSet.clear();  // v28
+    selectedSet.clear();  // v29
     saveState();
     redraw();
 }
 
-// v28: Clear only auto-detected elements (keep what user drew manually)
+// v29: Clear only auto-detected elements (keep what user drew manually)
 function clearDetectedOnly(){
     const before = elements.length;
     elements = elements.filter(el => !el.detected);
@@ -1820,7 +1949,7 @@ function clearDetectedOnly(){
     redraw();
 }
 
-// v28: Snap walls - align almost-straight walls to perfect H/V and merge close ones
+// v29: Snap walls - align almost-straight walls to perfect H/V and merge close ones
 function snapWalls(){
     const SNAP_ANGLE_DEG = 8;
     const MERGE_DIST = 12;
@@ -1914,7 +2043,7 @@ async function generate(){
 
 
 RESULT_PAGE = '''<!DOCTYPE html>
-<html><head><title>BAS Graphic v28</title>
+<html><head><title>BAS Graphic v29</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;padding:12px;}
@@ -1932,7 +2061,7 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 .btn-gray{background:#252a38;color:#aab0c4;}
 .footer{text-align:center;color:#3a4060;font-size:11px;margin-top:10px;}
 </style></head><body>
-<h1>Synchrony BAS Graphic v28</h1>
+<h1>Synchrony BAS Graphic v29</h1>
 <p class="sub">Top-down aerial projection - Ready for Tracer Synchrony / Niagara</p>
 <div class="stats">
 <div class="stat">VAVs: <b>{{ n_vavs }}</b></div>
@@ -1954,7 +2083,7 @@ h1{text-align:center;font-size:22px;margin-bottom:4px;background:linear-gradient
 <script>
 const data = {{ detection_json | safe }};
 
-// === TOP-DOWN AERIAL CABINET PROJECTION (v28) ===
+// === TOP-DOWN AERIAL CABINET PROJECTION (v29) ===
 // True cabinet projection from above: floor compressed Y but kept large,
 // walls extruded vertically with subtle perspective.
 // Much more "looking down at the building" feel.
@@ -2021,7 +2150,7 @@ function generateSVG(){
     svg += `<rect width="${svgW}" height="${svgH}" fill="#0a0a0d"/>`;
     svg += `<defs>`;
 
-    // === FLOOR PATTERN v28 - subtle grid with soft lighting ===
+    // === FLOOR PATTERN v29 - subtle grid with soft lighting ===
     svg += `<pattern id="floorGrid" width="48" height="34" patternUnits="userSpaceOnUse">`;
     svg += `<rect width="48" height="34" fill="#e2e2e6"/>`;
     svg += `<path d="M 0 0 L 48 0 M 0 0 L 0 34" stroke="#c8c8cc" stroke-width="0.5" opacity="0.6"/>`;
@@ -2033,14 +2162,14 @@ function generateSVG(){
     svg += `<stop offset="100%" stop-color="#000000" stop-opacity="0.12"/>`;
     svg += `</radialGradient>`;
 
-    // === WALL GRADIENTS v28 - darker outer, AO shading ===
+    // === WALL GRADIENTS v29 - darker outer, AO shading ===
     svg += `<linearGradient id="extSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#b8b8be"/><stop offset="100%" stop-color="#7a7a80"/></linearGradient>`;
     svg += `<linearGradient id="extTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#dcdce0"/><stop offset="100%" stop-color="#a8a8ac"/></linearGradient>`;
     svg += `<linearGradient id="intSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#c8c8cc"/><stop offset="100%" stop-color="#9a9aa0"/></linearGradient>`;
     svg += `<linearGradient id="intTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#e2e2e6"/><stop offset="100%" stop-color="#b8b8bc"/></linearGradient>`;
     svg += `<linearGradient id="wallEnd" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#a8a8ad"/><stop offset="100%" stop-color="#86868c"/></linearGradient>`;
 
-    // === DUCT GRADIENTS v28 - cleaner white, more volumetric ===
+    // === DUCT GRADIENTS v29 - cleaner white, more volumetric ===
     svg += `<linearGradient id="ductTop" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#ffffff"/><stop offset="60%" stop-color="#f4f4f7"/><stop offset="100%" stop-color="#e0e0e4"/></linearGradient>`;
     svg += `<linearGradient id="ductSide" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#d8d8dc"/><stop offset="100%" stop-color="#a4a4a8"/></linearGradient>`;
 
@@ -2087,7 +2216,7 @@ function generateSVG(){
         const p1b = { x: p1.x - nx, y: p1.y - ny };
         const p2a = { x: p2.x + nx, y: p2.y + ny };
         const p2b = { x: p2.x - nx, y: p2.y - ny };
-        // v28 FIX: Walls start slightly BELOW floor (z = -2) to eliminate gap
+        // v29 FIX: Walls start slightly BELOW floor (z = -2) to eliminate gap
         const BASE_Z = -2;
         const [b1ax, b1ay] = projSVG(p1a.x, p1a.y, BASE_Z);
         const [b1bx, b1by] = projSVG(p1b.x, p1b.y, BASE_Z);
@@ -2122,7 +2251,7 @@ function generateSVG(){
         }
     });
 
-    // v28: Render doors as short low walls (visible opening)
+    // v29: Render doors as short low walls (visible opening)
     elements.forEach(el => {
         if(el.type === 'door' && el.points && el.points.length === 2){
             const p1 = toLocal(el.points[0]);
@@ -2156,7 +2285,7 @@ function generateSVG(){
             const dx = p2.x - p1.x, dy = p2.y - p1.y;
             const len = Math.sqrt(dx*dx + dy*dy);
             if(len < 1) continue;
-            // v28: more consistent thickness, slightly chunkier for visibility
+            // v29: more consistent thickness, slightly chunkier for visibility
             const ductW = 16, ductH = 11;
             const nx = -dy / len * ductW / 2;
             const ny = dx / len * ductW / 2;
@@ -2366,7 +2495,7 @@ def upload():
                 n_walls = sum(1 for e in initial_elements if e.get("type") in ("extwall", "intwall"))
                 crop = stats.get("crop", (0, 0, 0, 0))
                 detected_message = (
-                    f"v28 Architectural Reconstruction: cropped {crop[2]}x{crop[3]}. "
+                    f"v29 Architectural Reconstruction: cropped {crop[2]}x{crop[3]}. "
                     f"{stats['lines_raw']} raw -> {stats.get('after_filter', 0)} filtered "
                     f"-> chained {stats.get('chained', 0)} | corridor: {stats.get('corridor', 'none')} "
                     f"| rooms: {stats.get('rooms', 0)} | walls: {stats.get('final_walls', n_walls)} "
