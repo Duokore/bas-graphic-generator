@@ -22,6 +22,7 @@ ISOLATED_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_isolated.png")
 # v30: Mask preview paths
 MASK_BINARY_PATH = os.path.join(UPLOAD_FOLDER, "clean_mask.png")
 MASK_PREVIEW_PATH = os.path.join(UPLOAD_FOLDER, "mask_preview.png")
+FLOORPLAN_BASE_PATH = os.path.join(OUTPUT_FOLDER, "floorplan_shape_base.png")
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -452,6 +453,102 @@ def render_mask_preview(clean_mask, original_img):
     preview[clean_mask > 0] = [240, 240, 240]
 
     return preview
+
+
+def _warp_mask_to_aerial(mask, canvas_size, offset_x, offset_y, skew=0.10, y_scale=0.58):
+    """Project a top-down mask into a simple aerial/Synchrony-like view."""
+    matrix = np.float32([[1, skew, offset_x], [0, y_scale, offset_y]])
+    return cv2.warpAffine(mask, matrix, canvas_size, flags=cv2.INTER_NEAREST, borderValue=0)
+
+
+def _shift_mask(mask, dx, dy):
+    h, w = mask.shape[:2]
+    matrix = np.float32([[1, 0, dx], [0, 1, dy]])
+    return cv2.warpAffine(mask, matrix, (w, h), flags=cv2.INTER_NEAREST, borderValue=0)
+
+
+def render_floorplan_shape_base(clean_mask):
+    """v31: Render a first-pass BAS-style floorplan base from the clean mask.
+
+    This is intentionally visual-first, not BIM reconstruction. It uses the
+    approved mask as a trace reference, creates a broad footprint for the floor,
+    draws a clipped grid, and lifts the wall pixels into a light aerial view.
+    """
+    if clean_mask is None:
+        return None
+    if len(clean_mask.shape) == 3:
+        clean_mask = cv2.cvtColor(clean_mask, cv2.COLOR_BGR2GRAY)
+    _, wall_mask = cv2.threshold(clean_mask, 1, 255, cv2.THRESH_BINARY)
+    h, w = wall_mask.shape[:2]
+
+    # Build a broad footprint from the wall trace. This keeps the same overall
+    # plan shape while avoiding room/area inference.
+    close_size = max(17, int(max(h, w) * 0.018))
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (close_size, close_size))
+    footprint = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, close_kernel, iterations=2)
+    footprint = cv2.dilate(footprint, cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)), iterations=1)
+
+    contours, _ = cv2.findContours(footprint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    footprint_clean = np.zeros_like(footprint)
+    min_area = max(500, int(h * w * 0.002))
+    for cnt in contours:
+        if cv2.contourArea(cnt) >= min_area:
+            epsilon = max(2.0, 0.0025 * cv2.arcLength(cnt, True))
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            cv2.drawContours(footprint_clean, [approx], -1, 255, thickness=-1)
+    if np.count_nonzero(footprint_clean) == 0:
+        footprint_clean = footprint
+
+    skew = 0.10
+    y_scale = 0.58
+    pad = 70
+    out_w = int(w + h * skew + pad * 2)
+    out_h = int(h * y_scale + pad * 2 + 70)
+    canvas_size = (out_w, out_h)
+    offset_x = pad
+    offset_y = pad + 38
+
+    floor_proj = _warp_mask_to_aerial(footprint_clean, canvas_size, offset_x, offset_y, skew, y_scale)
+    walls_proj = _warp_mask_to_aerial(wall_mask, canvas_size, offset_x, offset_y, skew, y_scale)
+    walls_proj = cv2.dilate(walls_proj, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
+
+    canvas = np.full((out_h, out_w, 3), 248, dtype=np.uint8)
+
+    # Soft shadow under the building.
+    shadow = _shift_mask(floor_proj, 18, 28)
+    canvas[shadow > 0] = [205, 205, 205]
+
+    # Floor fill.
+    canvas[floor_proj > 0] = [218, 218, 220]
+
+    # Clipped floor grid.
+    grid = np.zeros_like(floor_proj)
+    grid_step = 22
+    for x in range(0, out_w, grid_step):
+        cv2.line(grid, (x, 0), (x, out_h), 255, 1)
+    for y in range(0, out_h, grid_step):
+        cv2.line(grid, (0, y), (out_w, y), 255, 1)
+    grid = cv2.bitwise_and(grid, floor_proj)
+    canvas[grid > 0] = [194, 194, 198]
+
+    # Footprint edge.
+    edge_contours, _ = cv2.findContours(floor_proj, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(canvas, edge_contours, -1, (118, 128, 145), 2, lineType=cv2.LINE_AA)
+
+    # Wall side/extrusion.
+    wall_height = 30
+    for z in range(0, wall_height + 1, 3):
+        shifted = _shift_mask(walls_proj, 0, -z)
+        tone = 168 + int(45 * (z / max(wall_height, 1)))
+        canvas[shifted > 0] = [tone, tone, min(245, tone + 8)]
+
+    wall_top = _shift_mask(walls_proj, 0, -wall_height)
+    wall_top = cv2.dilate(wall_top, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)), iterations=1)
+    canvas[wall_top > 0] = [246, 246, 250]
+    wall_edges = cv2.Canny(wall_top, 50, 150)
+    canvas[wall_edges > 0] = [130, 132, 140]
+
+    return canvas
 
 
 # ============================================================
@@ -1438,6 +1535,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 <form method="POST" action="/mask-retry" style="display:inline;"><input type="hidden" name="mask_preset" value="balanced"><button type="submit" class="btn btn-orange">&#8635; Balanced</button></form>
 <form method="POST" action="/mask-retry" style="display:inline;"><input type="hidden" name="mask_preset" value="mechanical_dense"><button type="submit" class="btn btn-orange">Mechanical Dense</button></form>
 <form method="POST" action="/mask-retry" style="display:inline;"><input type="hidden" name="mask_preset" value="thin_scan"><button type="submit" class="btn btn-orange">Thin Scan</button></form>
+<form method="POST" action="/floorplan-base" style="display:inline;"><button type="submit" class="btn btn-gray">Floorplan Base</button></form>
 <form method="POST" action="/mask-approve" style="display:inline;"><button type="submit" class="btn btn-green">&#10003; Approve & Continue to Editor &rarr;</button></form>
 </div>
 </div>
@@ -1466,6 +1564,54 @@ If too much was removed, use a preset below to re-process with a different filte
 
 <div class="foot">Made by Paolo V. R.</div>
 
+</div>
+</body></html>'''
+
+
+FLOORPLAN_BASE_PAGE = '''<!DOCTYPE html>
+<html><head><title>Floorplan Base v31</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;padding:18px;}
+.wrap{max-width:1700px;margin:0 auto;}
+.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding:14px 22px;background:white;border-radius:12px;border:1px solid #d8dee8;box-shadow:0 8px 24px rgba(15,23,42,0.08);}
+.head h1{color:#1f4f82;font-size:22px;}
+.head .sub{color:#64748b;font-size:13px;margin-top:4px;}
+.head .badge{background:#1f4f82;color:white;padding:3px 9px;border-radius:5px;font-size:11px;font-weight:700;margin-left:8px;}
+.actions{display:flex;gap:8px;flex-wrap:wrap;}
+.btn{padding:10px 18px;border-radius:8px;border:none;font-size:14px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block;}
+.btn-blue{background:#2563eb;color:white;}
+.btn-green{background:#16a34a;color:white;}
+.btn-gray{background:#e5e7eb;color:#111827;}
+.panel{background:white;border:1px solid #d8dee8;border-radius:12px;padding:14px;box-shadow:0 8px 24px rgba(15,23,42,0.08);}
+.panel h2{font-size:13px;letter-spacing:1px;text-transform:uppercase;color:#475569;margin-bottom:10px;}
+.panel img{width:100%;display:block;border-radius:8px;border:1px solid #cbd5e1;background:white;}
+.info{background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:12px 18px;color:#7c2d12;font-size:14px;margin-bottom:14px;}
+.foot{text-align:center;color:#94a3b8;margin-top:18px;font-size:12px;}
+</style></head><body>
+<div class="wrap">
+<div class="head">
+<div>
+<h1>Floorplan Shape Base <span class="badge">v31 preview</span></h1>
+<div class="sub">First visual pass: same floorplan shape, cleaner BAS-style base</div>
+</div>
+<div class="actions">
+<form method="GET" action="/" style="display:inline;"><button type="submit" class="btn btn-gray">&larr; New Upload</button></form>
+<form method="POST" action="/mask-approve" style="display:inline;"><button type="submit" class="btn btn-blue">Back to Mask Editor Flow</button></form>
+<form method="POST" action="/floorplan-base-approve" style="display:inline;"><button type="submit" class="btn btn-green">Use This Base in Editor &rarr;</button></form>
+</div>
+</div>
+
+<div class="info">
+This preview is not trying to understand rooms or HVAC yet. It is the new direction: preserve the floorplan shape, make it look clean, then use fast editing tools on top.
+</div>
+
+<div class="panel">
+<h2>Generated BAS-Style Floorplan Base</h2>
+<img src="data:image/png;base64,{{ base_b64 }}" alt="Floorplan Shape Base">
+</div>
+
+<div class="foot">Made by Paolo V. R.</div>
 </div>
 </body></html>'''
 
@@ -2975,6 +3121,42 @@ def editor():
     )
 
 
+@app.route("/floorplan-base", methods=["POST"])
+def floorplan_base():
+    """v31 preview: render a BAS-style base from the approved/current mask."""
+    if not os.path.exists(MASK_BINARY_PATH):
+        return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No mask found. Run Mask Preview first. <a href='/' style='color:#2d89ef'>Back</a></h2>"
+    try:
+        clean_mask = cv2.imread(MASK_BINARY_PATH, cv2.IMREAD_GRAYSCALE)
+        if clean_mask is None:
+            return "<h2 style='color:white;background:#0d0f14;padding:30px;'>Could not read clean mask. <a href='/' style='color:#2d89ef'>Back</a></h2>"
+        base = render_floorplan_shape_base(clean_mask)
+        if base is None:
+            return "<h2 style='color:white;background:#0d0f14;padding:30px;'>Could not render floorplan base. <a href='/' style='color:#2d89ef'>Back</a></h2>"
+        cv2.imwrite(FLOORPLAN_BASE_PATH, base)
+        return render_template_string(
+            FLOORPLAN_BASE_PAGE,
+            base_b64=image_to_base64(FLOORPLAN_BASE_PATH)
+        )
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>Floorplan base error: {str(e)}<br><pre style='color:#aaa;font-size:11px;'>{tb}</pre><a href='/' style='color:#2d89ef'>Back</a></h2>"
+
+
+@app.route("/floorplan-base-approve", methods=["POST"])
+def floorplan_base_approve():
+    """Load the v31 floorplan base into the editor as the visual reference."""
+    if not os.path.exists(FLOORPLAN_BASE_PATH):
+        return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No floorplan base generated. <a href='/' style='color:#2d89ef'>Back</a></h2>"
+    return render_template_string(
+        EDITOR_PAGE,
+        image_b64=image_to_base64(FLOORPLAN_BASE_PATH),
+        initial_elements=json.dumps([]),
+        detected_message="v31 Floorplan Base: clean BAS-style shape loaded as reference. Next step is fast cleanup/editing tools."
+    )
+
+
 @app.route("/mask-approve", methods=["POST"])
 def mask_approve():
     """v30: User approved the mask preview. Enter editor with mask as visible reference."""
@@ -3061,5 +3243,3 @@ def result():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
-
