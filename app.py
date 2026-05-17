@@ -467,27 +467,31 @@ def _shift_mask(mask, dx, dy):
     return cv2.warpAffine(mask, matrix, (w, h), flags=cv2.INTER_NEAREST, borderValue=0)
 
 
-def _extract_visual_wall_lines(mask):
-    """Keep long architectural-looking strokes for the v31 floorplan render."""
+def _extract_visual_wall_lines(mask, major_only=False):
+    """Keep architectural-looking strokes for the v31 floorplan render."""
     h, w = mask.shape[:2]
     max_dim = max(h, w)
-    line_len = max(18, int(max_dim * 0.028))
+    line_len = max(18, int(max_dim * (0.055 if major_only else 0.028)))
 
-    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (line_len, 2))
-    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (2, line_len))
+    line_width = 1 if major_only else 2
+    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (line_len, line_width))
+    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (line_width, line_len))
     horizontal = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_h, iterations=1)
     vertical = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_v, iterations=1)
     lines = cv2.bitwise_or(horizontal, vertical)
 
     # Restore a readable wall body, then drop tiny fragments.
-    lines = cv2.dilate(lines, cv2.getStructuringElement(cv2.MORPH_RECT, (4, 4)), iterations=1)
+    restore_size = 2 if major_only else 4
+    lines = cv2.dilate(lines, cv2.getStructuringElement(cv2.MORPH_RECT, (restore_size, restore_size)), iterations=1)
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(lines, connectivity=8)
     filtered = np.zeros_like(lines)
-    min_area = max(45, int(h * w * 0.00008))
+    min_area = max(120 if major_only else 45, int(h * w * (0.00022 if major_only else 0.00008)))
+    min_aspect = 4.0 if major_only else 2.2
+    min_long = line_len * (1.8 if major_only else 1.2)
     for i in range(1, num_labels):
         x, y, cw, ch, area = stats[i]
         aspect = max(cw, ch) / max(min(cw, ch), 1)
-        if area >= min_area and (aspect >= 2.2 or max(cw, ch) >= line_len * 1.2):
+        if area >= min_area and aspect >= min_aspect and max(cw, ch) >= min_long:
             filtered[labels == i] = 255
     return filtered
 
@@ -542,9 +546,9 @@ def render_floorplan_shape_base(clean_mask):
 
     floor_proj = _warp_mask_to_aerial(footprint_clean, canvas_size, offset_x, offset_y, skew, y_scale)
     shell_proj = _warp_mask_to_aerial(exterior_shell, canvas_size, offset_x, offset_y, skew, y_scale)
-    visual_walls = _extract_visual_wall_lines(wall_mask)
+    visual_walls = _extract_visual_wall_lines(wall_mask, major_only=True)
     if np.count_nonzero(visual_walls) < max(100, int(np.count_nonzero(wall_mask) * 0.05)):
-        visual_walls = wall_mask
+        visual_walls = _extract_visual_wall_lines(wall_mask, major_only=False)
 
     interior_walls = cv2.bitwise_and(visual_walls, cv2.bitwise_not(cv2.dilate(exterior_shell, shell_kernel, iterations=1)))
     interior_proj = _warp_mask_to_aerial(interior_walls, canvas_size, offset_x, offset_y, skew, y_scale)
@@ -1488,11 +1492,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v31.2 <span class="badge">EXTERIOR SHELL BASE</span></h1>
+<h1>BAS Generator v31.3 <span class="badge">MAJOR WALL BASE</span></h1>
 <p class="sub">Smart trace + clean floorplan shape workflow</p>
 
 <div class="tip">
-<b>v31.2 NEW:</b> Floorplan Base extrudes the exterior shell and keeps interior walls lower/cleaner.
+<b>v31.3 NEW:</b> Floorplan Base focuses on exterior shape plus major long wall lines.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1512,7 +1516,7 @@ Auto-Detect Colors
 <small>Detects HVAC if pre-marked</small>
 </button>
 <button type="button" class="option-btn" id="maskBtn" onclick="setMode('mask')" style="border:2px solid #22d3ee;">
-&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v31.2</span>
+&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v31.3</span>
 <small>Mask first, then Floorplan Base</small>
 </button>
 </div>
@@ -1577,7 +1581,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 
 <div class="head">
 <div>
-<h1>&#10024; Architectural Mask Preview <span class="badge">v31.2</span></h1>
+<h1>&#10024; Architectural Mask Preview <span class="badge">v31.3</span></h1>
 <div class="sub">Compare original vs. clean architectural mask before editing</div>
 </div>
 <div class="actions">
@@ -1642,7 +1646,7 @@ body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;mi
 <div class="wrap">
 <div class="head">
 <div>
-<h1>Floorplan Shape Base <span class="badge">v31.2 preview</span></h1>
+<h1>Floorplan Shape Base <span class="badge">v31.3 preview</span></h1>
 <div class="sub">First visual pass: same floorplan shape, cleaner BAS-style base</div>
 </div>
 <div class="actions">
