@@ -496,7 +496,59 @@ def _extract_visual_wall_lines(mask, major_only=False):
     return filtered
 
 
-def render_floorplan_shape_base(clean_mask):
+def _extract_footprint_from_original(original_img):
+    """Extract a broad floorplan footprint from the original isolated plan."""
+    if original_img is None:
+        return None
+    if len(original_img.shape) == 3:
+        gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = original_img
+    h, w = gray.shape[:2]
+
+    # Use a softer threshold than the clean mask so faint exterior lines survive.
+    _, binary = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY_INV)
+
+    # Remove tiny text/speckle but keep long building geometry.
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    filtered = np.zeros_like(binary)
+    min_area = max(25, int(h * w * 0.00003))
+    for i in range(1, num_labels):
+        x, y, cw, ch, area = stats[i]
+        if area >= min_area:
+            filtered[labels == i] = 255
+
+    # Close gaps aggressively enough to build the whole building footprint.
+    max_dim = max(h, w)
+    close_x = max(25, int(max_dim * 0.045))
+    close_y = max(17, int(max_dim * 0.030))
+    k1 = cv2.getStructuringElement(cv2.MORPH_RECT, (close_x, close_y))
+    footprint = cv2.morphologyEx(filtered, cv2.MORPH_CLOSE, k1, iterations=2)
+    footprint = cv2.dilate(footprint, cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11)), iterations=1)
+
+    contours, _ = cv2.findContours(footprint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    # Keep major content components. This avoids title notes while allowing
+    # separated wings/edges from messy scans.
+    clean = np.zeros_like(footprint)
+    min_contour_area = max(1000, int(h * w * 0.01))
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_contour_area:
+            continue
+        epsilon = max(2.0, 0.003 * cv2.arcLength(cnt, True))
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        cv2.drawContours(clean, [approx], -1, 255, thickness=-1)
+
+    if np.count_nonzero(clean) == 0:
+        largest = max(contours, key=cv2.contourArea)
+        cv2.drawContours(clean, [largest], -1, 255, thickness=-1)
+    return clean
+
+
+def render_floorplan_shape_base(clean_mask, original_img=None, source_mode="hybrid"):
     """v31: Render a first-pass BAS-style floorplan base from the clean mask.
 
     This is intentionally visual-first, not BIM reconstruction. It uses the
@@ -509,6 +561,7 @@ def render_floorplan_shape_base(clean_mask):
         clean_mask = cv2.cvtColor(clean_mask, cv2.COLOR_BGR2GRAY)
     _, wall_mask = cv2.threshold(clean_mask, 1, 255, cv2.THRESH_BINARY)
     h, w = wall_mask.shape[:2]
+    source_mode = source_mode or "hybrid"
 
     # Build a broad footprint from the wall trace. This keeps the same overall
     # plan shape while avoiding room/area inference.
@@ -527,6 +580,24 @@ def render_floorplan_shape_base(clean_mask):
             cv2.drawContours(footprint_clean, [approx], -1, 255, thickness=-1)
     if np.count_nonzero(footprint_clean) == 0:
         footprint_clean = footprint
+
+    original_footprint = None
+    if original_img is not None and source_mode in ("hybrid", "original"):
+        original_footprint = _extract_footprint_from_original(original_img)
+        if original_footprint is not None and original_footprint.shape[:2] != wall_mask.shape[:2]:
+            original_footprint = cv2.resize(original_footprint, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    if source_mode == "original" and original_footprint is not None:
+        footprint_clean = original_footprint
+    elif source_mode == "hybrid" and original_footprint is not None:
+        mask_area = np.count_nonzero(footprint_clean)
+        original_area = np.count_nonzero(original_footprint)
+        # If the mask footprint is missing big chunks, trust the original
+        # footprint. Otherwise union them so weak exterior edges are restored.
+        if original_area > 0 and mask_area < original_area * 0.72:
+            footprint_clean = original_footprint
+        else:
+            footprint_clean = cv2.bitwise_or(footprint_clean, original_footprint)
 
     skew = 0.10
     y_scale = 0.58
@@ -1492,11 +1563,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v31.3 <span class="badge">MAJOR WALL BASE</span></h1>
+<h1>BAS Generator v31.4 <span class="badge">HYBRID FOOTPRINT</span></h1>
 <p class="sub">Smart trace + clean floorplan shape workflow</p>
 
 <div class="tip">
-<b>v31.3 NEW:</b> Floorplan Base focuses on exterior shape plus major long wall lines.
+<b>v31.4 NEW:</b> Floorplan Base can use original-plan footprint plus mask-based major walls for tougher drawings.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1516,7 +1587,7 @@ Auto-Detect Colors
 <small>Detects HVAC if pre-marked</small>
 </button>
 <button type="button" class="option-btn" id="maskBtn" onclick="setMode('mask')" style="border:2px solid #22d3ee;">
-&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v31.3</span>
+&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v31.4</span>
 <small>Mask first, then Floorplan Base</small>
 </button>
 </div>
@@ -1581,7 +1652,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 
 <div class="head">
 <div>
-<h1>&#10024; Architectural Mask Preview <span class="badge">v31.3</span></h1>
+<h1>&#10024; Architectural Mask Preview <span class="badge">v31.4</span></h1>
 <div class="sub">Compare original vs. clean architectural mask before editing</div>
 </div>
 <div class="actions">
@@ -1646,18 +1717,21 @@ body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;mi
 <div class="wrap">
 <div class="head">
 <div>
-<h1>Floorplan Shape Base <span class="badge">v31.3 preview</span></h1>
+<h1>Floorplan Shape Base <span class="badge">v31.4 preview</span></h1>
 <div class="sub">First visual pass: same floorplan shape, cleaner BAS-style base</div>
 </div>
 <div class="actions">
 <form method="GET" action="/" style="display:inline;"><button type="submit" class="btn btn-gray">&larr; New Upload</button></form>
+<form method="POST" action="/floorplan-base" style="display:inline;"><input type="hidden" name="base_source" value="hybrid"><button type="submit" class="btn btn-gray">Hybrid</button></form>
+<form method="POST" action="/floorplan-base" style="display:inline;"><input type="hidden" name="base_source" value="mask"><button type="submit" class="btn btn-gray">Mask Source</button></form>
+<form method="POST" action="/floorplan-base" style="display:inline;"><input type="hidden" name="base_source" value="original"><button type="submit" class="btn btn-gray">Original Source</button></form>
 <form method="POST" action="/mask-approve" style="display:inline;"><button type="submit" class="btn btn-blue">Back to Mask Editor Flow</button></form>
 <form method="POST" action="/floorplan-base-approve" style="display:inline;"><button type="submit" class="btn btn-green">Use This Base in Editor &rarr;</button></form>
 </div>
 </div>
 
 <div class="info">
-This preview is not trying to understand rooms or HVAC yet. It is the new direction: preserve the floorplan shape, make it look clean, then use fast editing tools on top.
+This preview is not trying to understand rooms or HVAC yet. It preserves the floorplan shape first. Source: <b>{{ source_mode }}</b>.
 </div>
 
 <div class="panel">
@@ -3181,16 +3255,19 @@ def floorplan_base():
     if not os.path.exists(MASK_BINARY_PATH):
         return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No mask found. Run Mask Preview first. <a href='/' style='color:#2d89ef'>Back</a></h2>"
     try:
+        source_mode = request.form.get("base_source", "hybrid")
         clean_mask = cv2.imread(MASK_BINARY_PATH, cv2.IMREAD_GRAYSCALE)
         if clean_mask is None:
             return "<h2 style='color:white;background:#0d0f14;padding:30px;'>Could not read clean mask. <a href='/' style='color:#2d89ef'>Back</a></h2>"
-        base = render_floorplan_shape_base(clean_mask)
+        original_img = cv2.imread(UPLOAD_IMAGE_PATH) if os.path.exists(UPLOAD_IMAGE_PATH) else None
+        base = render_floorplan_shape_base(clean_mask, original_img=original_img, source_mode=source_mode)
         if base is None:
             return "<h2 style='color:white;background:#0d0f14;padding:30px;'>Could not render floorplan base. <a href='/' style='color:#2d89ef'>Back</a></h2>"
         cv2.imwrite(FLOORPLAN_BASE_PATH, base)
         return render_template_string(
             FLOORPLAN_BASE_PAGE,
-            base_b64=image_to_base64(FLOORPLAN_BASE_PATH)
+            base_b64=image_to_base64(FLOORPLAN_BASE_PATH),
+            source_mode=source_mode
         )
     except Exception as e:
         import traceback
