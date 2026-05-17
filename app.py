@@ -216,7 +216,7 @@ def _remove_solid_filled_regions(mask, min_area=400):
     return result
 
 
-def generate_clean_mask(img_bgr, debug=False):
+def generate_clean_mask(img_bgr, debug=False, preset="balanced"):
     """v30.2: Generate a clean architectural mask with ADAPTIVE thresholds.
 
     Improvements over v30:
