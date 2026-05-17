@@ -467,6 +467,31 @@ def _shift_mask(mask, dx, dy):
     return cv2.warpAffine(mask, matrix, (w, h), flags=cv2.INTER_NEAREST, borderValue=0)
 
 
+def _extract_visual_wall_lines(mask):
+    """Keep long architectural-looking strokes for the v31 floorplan render."""
+    h, w = mask.shape[:2]
+    max_dim = max(h, w)
+    line_len = max(18, int(max_dim * 0.028))
+
+    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (line_len, 2))
+    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (2, line_len))
+    horizontal = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_h, iterations=1)
+    vertical = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_v, iterations=1)
+    lines = cv2.bitwise_or(horizontal, vertical)
+
+    # Restore a readable wall body, then drop tiny fragments.
+    lines = cv2.dilate(lines, cv2.getStructuringElement(cv2.MORPH_RECT, (4, 4)), iterations=1)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(lines, connectivity=8)
+    filtered = np.zeros_like(lines)
+    min_area = max(45, int(h * w * 0.00008))
+    for i in range(1, num_labels):
+        x, y, cw, ch, area = stats[i]
+        aspect = max(cw, ch) / max(min(cw, ch), 1)
+        if area >= min_area and (aspect >= 2.2 or max(cw, ch) >= line_len * 1.2):
+            filtered[labels == i] = 255
+    return filtered
+
+
 def render_floorplan_shape_base(clean_mask):
     """v31: Render a first-pass BAS-style floorplan base from the clean mask.
 
@@ -509,7 +534,11 @@ def render_floorplan_shape_base(clean_mask):
     offset_y = pad + 38
 
     floor_proj = _warp_mask_to_aerial(footprint_clean, canvas_size, offset_x, offset_y, skew, y_scale)
-    walls_proj = _warp_mask_to_aerial(wall_mask, canvas_size, offset_x, offset_y, skew, y_scale)
+    visual_walls = _extract_visual_wall_lines(wall_mask)
+    if np.count_nonzero(visual_walls) < max(100, int(np.count_nonzero(wall_mask) * 0.05)):
+        visual_walls = wall_mask
+
+    walls_proj = _warp_mask_to_aerial(visual_walls, canvas_size, offset_x, offset_y, skew, y_scale)
     walls_proj = cv2.dilate(walls_proj, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
 
     canvas = np.full((out_h, out_w, 3), 248, dtype=np.uint8)
@@ -1438,11 +1467,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v31 <span class="badge">FLOORPLAN BASE PREVIEW</span></h1>
+<h1>BAS Generator v31.1 <span class="badge">CLEANER WALL BASE</span></h1>
 <p class="sub">Smart trace + clean floorplan shape workflow</p>
 
 <div class="tip">
-<b>v31 NEW:</b> Floorplan Base preview after Mask Preview, plus v30.3 recovery presets and debug stats.
+<b>v31.1 NEW:</b> Floorplan Base now separates the floor footprint from long visual wall lines.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1462,7 +1491,7 @@ Auto-Detect Colors
 <small>Detects HVAC if pre-marked</small>
 </button>
 <button type="button" class="option-btn" id="maskBtn" onclick="setMode('mask')" style="border:2px solid #22d3ee;">
-&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v31</span>
+&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v31.1</span>
 <small>Mask first, then Floorplan Base</small>
 </button>
 </div>
@@ -1592,7 +1621,7 @@ body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;mi
 <div class="wrap">
 <div class="head">
 <div>
-<h1>Floorplan Shape Base <span class="badge">v31 preview</span></h1>
+<h1>Floorplan Shape Base <span class="badge">v31.1 preview</span></h1>
 <div class="sub">First visual pass: same floorplan shape, cleaner BAS-style base</div>
 </div>
 <div class="actions">
