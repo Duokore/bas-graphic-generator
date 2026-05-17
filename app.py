@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, jsonify, redirect, make_response
+﻿from flask import Flask, request, render_template_string, jsonify, redirect, make_response
 import os
 import base64
 import json
@@ -217,39 +217,91 @@ def _remove_solid_filled_regions(mask, min_area=400):
 
 
 def generate_clean_mask(img_bgr, debug=False, preset="balanced"):
-    """v30.2: Generate a clean architectural mask with ADAPTIVE thresholds.
+    """v30.3: Generate a clean architectural mask with presets + recovery fallback.
 
-    Improvements over v30:
-    - Adaptive erosion kernel based on detected line thickness
-    - Filled-blob rejection (rooms incorrectly filled get removed)
-    - SOLID region removal via morphological opening (elevator shafts, hatches)
-    - Gap repair with line-shaped kernels (not block-shaped)
-    - Better wall preservation for thin-walled plans
+    Philosophy: Smart Trace + Smart Cleanup. The mask should never fail into a
+    blank preview. If the selected preset is too aggressive, recovery mode keeps
+    more source geometry so the technician can clean it manually.
+
+    Presets:
+    - balanced: default v30.2-like behavior
+    - mechanical_dense: more aggressive for duct/symbol-heavy drawings
+    - thin_scan: conservative for faint/thin wall scans
+    - recovery: last-resort low-confidence mask when normal filtering fails
 
     Returns: clean_mask (binary image) OR (clean_mask, stats) if debug=True
     """
+    preset = preset or "balanced"
+    presets = {
+        "balanced": {
+            "threshold": 200,
+            "blob_min_area": 400,
+            "remove_solid": True,
+            "erode_adjust": 0,
+            "short_adjust": 0,
+            "area_scale": 1.0,
+            "long_scale": 1.0,
+            "final_min_area": 200,
+            "gap_scale": 1.0,
+        },
+        "mechanical_dense": {
+            "threshold": 190,
+            "blob_min_area": 300,
+            "remove_solid": True,
+            "erode_adjust": 1,
+            "short_adjust": 1,
+            "area_scale": 1.2,
+            "long_scale": 1.1,
+            "final_min_area": 250,
+            "gap_scale": 1.0,
+        },
+        "thin_scan": {
+            "threshold": 225,
+            "blob_min_area": 900,
+            "remove_solid": False,
+            "erode_adjust": -1,
+            "short_adjust": -2,
+            "area_scale": 0.45,
+            "long_scale": 0.55,
+            "final_min_area": 80,
+            "gap_scale": 0.8,
+        },
+        "recovery": {
+            "threshold": 230,
+            "blob_min_area": 1200,
+            "remove_solid": False,
+            "erode_adjust": -2,
+            "short_adjust": -3,
+            "area_scale": 0.25,
+            "long_scale": 0.35,
+            "final_min_area": 50,
+            "gap_scale": 0.75,
+        },
+    }
+    if preset not in presets:
+        preset = "balanced"
+    cfg = presets[preset]
+
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape[:2]
 
-    # Step 1: Binary inverted
-    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+    # Step 1: Binary inverted using preset-specific threshold.
+    _, binary = cv2.threshold(gray, cfg["threshold"], 255, cv2.THRESH_BINARY_INV)
     raw_pixels = int(np.count_nonzero(binary))
 
-    # Step 1b (v30.2 NEW): REMOVE SOLID FILLED REGIONS from binary
-    # This kills elevator shafts, hatched areas, and filled symbols BEFORE other steps
-    binary = _remove_solid_filled_regions(binary, min_area=400)
+    # Step 1b: Optional solid-region removal. Disabled for thin_scan/recovery
+    # because this is the step most likely to erase faint architectural lines.
+    if cfg["remove_solid"]:
+        binary = _remove_solid_filled_regions(binary, min_area=cfg["blob_min_area"])
     after_blob_removal = int(np.count_nonzero(binary))
 
-    # Step 2 (v30.2): ESTIMATE line thickness in this specific plan
+    # Step 2: Estimate line thickness in this specific plan.
     median_thickness = _estimate_line_thickness(binary)
 
-    # Adaptive parameters based on detected thickness:
-    # - Thin-walled plans (compressed, small): use erosion 2x2 to preserve walls
-    # - Normal plans: erosion 3x3
-    # - Thick-walled plans: erosion 4x4 to kill ducts more aggressively
+    # Step 3: Base adaptive parameters by thickness.
     if median_thickness <= 3:
         erode_size = 2
-        short_dim_min = 2  # Accept thin survivors on compressed plans
+        short_dim_min = 2
         area_min = 150
         long_dim_min = 50
     elif median_thickness >= 6:
@@ -263,27 +315,34 @@ def generate_clean_mask(img_bgr, debug=False, preset="balanced"):
         area_min = 250
         long_dim_min = 70
 
-    # Step 3: Initial CC filter - kill obvious text and tiny symbols
+    # Step 3b: Preset tuning. This is the v30.3 stabilizer: different plan
+    # families get different tolerance without forcing one universal filter.
+    erode_size = max(1, min(5, erode_size + cfg["erode_adjust"]))
+    short_dim_min = max(1, short_dim_min + cfg["short_adjust"])
+    area_min = max(40, int(area_min * cfg["area_scale"]))
+    long_dim_min = max(20, int(long_dim_min * cfg["long_scale"]))
+
+    # Step 4: Initial CC filter - kill obvious text and tiny symbols.
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     architectural = np.zeros_like(binary)
     n_kept_step3 = 0
     for i in range(1, num_labels):
         x, y, cw, ch, area = stats[i]
         aspect = max(cw, ch) / max(min(cw, ch), 1)
-        # Keep elongated OR large components
-        if (aspect > 4 and area > 100) or (area > 800 and max(cw, ch) > 60):
+        keep_candidate = (
+            (aspect > 4 and area > max(50, int(100 * cfg["area_scale"]))) or
+            (area > max(250, int(800 * cfg["area_scale"])) and max(cw, ch) > long_dim_min)
+        )
+        if keep_candidate:
             architectural[labels == i] = 255
             n_kept_step3 += 1
 
-    # Step 4 (v30.2 ADAPTIVE): Erode to kill thin lines
+    # Step 5: Erode/dilate to suppress thinner non-wall content.
     kernel_erode = cv2.getStructuringElement(cv2.MORPH_RECT, (erode_size, erode_size))
     eroded = cv2.erode(architectural, kernel_erode, iterations=1)
+    walls_only = cv2.dilate(eroded, kernel_erode, iterations=1)
 
-    # Step 5: Dilate back to restore wall body
-    kernel_restore = cv2.getStructuringElement(cv2.MORPH_RECT, (erode_size, erode_size))
-    walls_only = cv2.dilate(eroded, kernel_restore, iterations=1)
-
-    # Step 6 (v30.2): Filter with adaptive thresholds + REJECT FILLED BLOBS
+    # Step 6: Final wall-like component filter.
     num_labels2, labels2, stats2, _ = cv2.connectedComponentsWithStats(walls_only, connectivity=8)
     clean_mask = np.zeros_like(walls_only)
     n_kept_step6 = 0
@@ -293,13 +352,11 @@ def generate_clean_mask(img_bgr, debug=False, preset="balanced"):
         aspect = max(cw, ch) / max(min(cw, ch), 1)
         short_dim = min(cw, ch)
 
-        # v30.2 NEW: Reject filled-blob components (rooms incorrectly merged)
-        # Exception: VERY large blobs are usually the building outline, keep them
-        if _is_blob_like(cw, ch, area) and area < 15000:
+        # Reject medium filled blobs, but preserve very large building-scale masses.
+        if cfg["remove_solid"] and _is_blob_like(cw, ch, area) and area < 15000:
             n_blobs_rejected += 1
             continue
 
-        # Keep walls: short_dim ok AND (elongated OR very large for outline)
         keep_wall = (
             short_dim >= short_dim_min and
             ((aspect > 3 and area > area_min and max(cw, ch) > long_dim_min) or area > 4000)
@@ -308,37 +365,78 @@ def generate_clean_mask(img_bgr, debug=False, preset="balanced"):
             clean_mask[labels2 == i] = 255
             n_kept_step6 += 1
 
-    # Step 7 (v30.2): SMART gap repair - adaptive size, line-shaped kernel
-    # Bigger gaps for thicker walls (they typically have bigger discontinuities)
-    gap_size = max(8, median_thickness * 2)
+    # Step 7: Smart line-shaped gap repair.
+    gap_size = max(6, int(max(8, median_thickness * 2) * cfg["gap_scale"]))
     clean_mask = _repair_small_gaps(clean_mask, max_gap=gap_size)
 
-    # Step 8 (v30.2): Final tiny cleanup - drop islands smaller than 200px
+    # Step 8: Final island cleanup.
     num_final, labels_final, stats_final, _ = cv2.connectedComponentsWithStats(clean_mask, connectivity=8)
     final_mask = np.zeros_like(clean_mask)
     n_final = 0
     for i in range(1, num_final):
         x, y, cw, ch, area = stats_final[i]
-        if area >= 200:
+        if area >= cfg["final_min_area"]:
             final_mask[labels_final == i] = 255
             n_final += 1
 
+    final_pixels = int(np.count_nonzero(final_mask))
+    final_density = final_pixels / max(h * w, 1)
     stats_dict = {
+        "version": "v30.3",
+        "preset": preset,
         "median_thickness": median_thickness,
         "erode_size": erode_size,
+        "threshold": cfg["threshold"],
         "raw_pixels": raw_pixels,
         "after_blob_removal_pixels": after_blob_removal,
         "after_text_filter": n_kept_step3,
         "after_wall_filter": n_kept_step6,
         "blobs_rejected": n_blobs_rejected,
         "final_components": n_final,
-        "final_pixels": int(np.count_nonzero(final_mask)),
+        "final_pixels": final_pixels,
+        "final_density": round(final_density, 5),
+        "recovery_used": False,
+        "recovery_from": "",
     }
+
+    # v30.3 Recovery: never leave the user with a blank mask preview. If a
+    # normal preset discards everything, rerun conservatively and keep more lines.
+    mask_failed = (
+        stats_dict["final_components"] == 0 or
+        stats_dict["after_wall_filter"] == 0 or
+        final_density < 0.0005
+    )
+    if mask_failed and preset != "recovery":
+        recovery_mask, recovery_stats = generate_clean_mask(img_bgr, debug=True, preset="recovery")
+        if recovery_stats.get("final_pixels", 0) > final_pixels:
+            recovery_stats["recovery_used"] = True
+            recovery_stats["recovery_from"] = preset
+            if debug:
+                return recovery_mask, recovery_stats
+            return recovery_mask
 
     if debug:
         return final_mask, stats_dict
     return final_mask
 
+
+def format_mask_stats(mask_stats):
+    """Build compact v30.3 debug text for the preview page."""
+    recovery = ""
+    if mask_stats.get("recovery_used"):
+        recovery = f", RECOVERY from {mask_stats.get('recovery_from', 'unknown')}"
+    return (
+        f"version={mask_stats.get('version', 'v30.3')}, "
+        f"preset={mask_stats.get('preset', 'balanced')}{recovery}, "
+        f"threshold={mask_stats.get('threshold', 'n/a')}, "
+        f"thickness={mask_stats.get('median_thickness', 'n/a')}px, "
+        f"erode={mask_stats.get('erode_size', 'n/a')}x{mask_stats.get('erode_size', 'n/a')}, "
+        f"text-filter: {mask_stats.get('after_text_filter', 0)} kept, "
+        f"wall-filter: {mask_stats.get('after_wall_filter', 0)} kept, "
+        f"blobs rejected: {mask_stats.get('blobs_rejected', 0)}, "
+        f"final components: {mask_stats.get('final_components', 0)}, "
+        f"density={mask_stats.get('final_density', 0)}"
+    )
 
 def render_mask_preview(clean_mask, original_img):
     """v30: Render the clean mask as a presentable image.
@@ -1243,11 +1341,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v30.2 <span class="badge">MASK STABILIZED</span></h1>
+<h1>BAS Generator v30.3 <span class="badge">RECOVERY MODE</span></h1>
 <p class="sub">Clean architectural mask + smart cleanup workflow</p>
 
 <div class="tip">
-<b>v30.2 NEW:</b> Adaptive thresholds, blob rejection, smart gap repair, debug stats. Works on more plan types!
+<b>v30.3 NEW:</b> Presets, recovery fallback, adaptive thresholds, blob rejection, smart gap repair, debug stats.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1267,7 +1365,7 @@ Auto-Detect Colors
 <small>Detects HVAC if pre-marked</small>
 </button>
 <button type="button" class="option-btn" id="maskBtn" onclick="setMode('mask')" style="border:2px solid #22d3ee;">
-&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v30</span>
+&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v30.3</span>
 <small>Clean architectural mask first</small>
 </button>
 </div>
@@ -1302,7 +1400,7 @@ function setMode(mode){
 
 
 MASK_PREVIEW_PAGE = '''<!DOCTYPE html>
-<html><head><title>Mask Preview v30</title>
+<html><head><title>Mask Preview v30.3</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;padding:18px;}
@@ -1332,12 +1430,14 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 
 <div class="head">
 <div>
-<h1>&#10024; Architectural Mask Preview <span class="badge">v30</span></h1>
+<h1>&#10024; Architectural Mask Preview <span class="badge">v30.3</span></h1>
 <div class="sub">Compare original vs. clean architectural mask before editing</div>
 </div>
 <div class="actions">
 <form method="GET" action="/" style="display:inline;"><button type="submit" class="btn btn-gray">&larr; Back</button></form>
-<form method="POST" action="/mask-retry" style="display:inline;"><button type="submit" class="btn btn-orange">&#8635; Re-process</button></form>
+<form method="POST" action="/mask-retry" style="display:inline;"><input type="hidden" name="mask_preset" value="balanced"><button type="submit" class="btn btn-orange">&#8635; Balanced</button></form>
+<form method="POST" action="/mask-retry" style="display:inline;"><input type="hidden" name="mask_preset" value="mechanical_dense"><button type="submit" class="btn btn-orange">Mechanical Dense</button></form>
+<form method="POST" action="/mask-retry" style="display:inline;"><input type="hidden" name="mask_preset" value="thin_scan"><button type="submit" class="btn btn-orange">Thin Scan</button></form>
 <form method="POST" action="/mask-approve" style="display:inline;"><button type="submit" class="btn btn-green">&#10003; Approve & Continue to Editor &rarr;</button></form>
 </div>
 </div>
@@ -1346,7 +1446,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 <b>How this works:</b> The app filtered out HVAC ducts, text, dimension lines, and symbols.
 The clean mask on the right shows ONLY the architectural walls and building shape.
 If it looks good, click <b>Approve</b> to enter the editor with this as a reference layer.
-If too much was removed, click <b>Re-process</b> to adjust filters.
+If too much was removed, use a preset below to re-process with a different filter style.
 </div>
 
 <div style="background:#1a1d24;border:1px solid #2a2f3a;border-radius:12px;padding:10px 22px;margin-top:10px;font-family:'Courier New',monospace;font-size:12px;color:#94a3b8;">
@@ -2838,19 +2938,12 @@ def upload():
             isolated, _crop = smart_isolate_floorplan(img)
             cv2.imwrite(UPLOAD_IMAGE_PATH, isolated)
             # Generate the clean architectural mask (v30.2: with debug stats)
-            clean_mask, mask_stats = generate_clean_mask(isolated, debug=True)
+            clean_mask, mask_stats = generate_clean_mask(isolated, debug=True, preset="balanced")
             preview = render_mask_preview(clean_mask, isolated)
             cv2.imwrite(MASK_BINARY_PATH, clean_mask)
             cv2.imwrite(MASK_PREVIEW_PATH, preview)
             # v30.2: Build stats text for display
-            stats_text = (
-                f"thickness={mask_stats['median_thickness']}px, "
-                f"erode={mask_stats['erode_size']}x{mask_stats['erode_size']}, "
-                f"text-filter: {mask_stats['after_text_filter']} kept, "
-                f"wall-filter: {mask_stats['after_wall_filter']} kept, "
-                f"blobs rejected: {mask_stats['blobs_rejected']}, "
-                f"final components: {mask_stats['final_components']}"
-            )
+            stats_text = format_mask_stats(mask_stats)
             return render_template_string(
                 MASK_PREVIEW_PAGE,
                 original_b64=image_to_base64(UPLOAD_IMAGE_PATH),
@@ -2894,7 +2987,7 @@ def mask_approve():
         EDITOR_PAGE,
         image_b64=image_to_base64(bg_path),
         initial_elements=json.dumps([]),
-        detected_message="v30 Mask Mode: clean architectural mask loaded as reference. Start tracing walls on top!"
+        detected_message="v30.3 Mask Mode: clean architectural mask loaded as reference. Start tracing walls on top!"
     )
 
 
@@ -2907,18 +3000,12 @@ def mask_retry():
         img = cv2.imread(UPLOAD_IMAGE_PATH)
         if img is None:
             return "<h2 style='color:white;background:#0d0f14;padding:30px;'>Could not re-read uploaded image. <a href='/' style='color:#2d89ef'>Back</a></h2>"
-        clean_mask, mask_stats = generate_clean_mask(img, debug=True)
+        preset = request.form.get("mask_preset", "balanced")
+        clean_mask, mask_stats = generate_clean_mask(img, debug=True, preset=preset)
         preview = render_mask_preview(clean_mask, img)
         cv2.imwrite(MASK_BINARY_PATH, clean_mask)
         cv2.imwrite(MASK_PREVIEW_PATH, preview)
-        stats_text = (
-            f"thickness={mask_stats['median_thickness']}px, "
-            f"erode={mask_stats['erode_size']}x{mask_stats['erode_size']}, "
-            f"text-filter: {mask_stats['after_text_filter']} kept, "
-            f"wall-filter: {mask_stats['after_wall_filter']} kept, "
-            f"blobs rejected: {mask_stats['blobs_rejected']}, "
-            f"final components: {mask_stats['final_components']}"
-        )
+        stats_text = format_mask_stats(mask_stats)
         return render_template_string(
             MASK_PREVIEW_PAGE,
             original_b64=image_to_base64(UPLOAD_IMAGE_PATH),
@@ -2974,3 +3061,5 @@ def result():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
+
