@@ -1438,11 +1438,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v30.3 <span class="badge">RECOVERY MODE</span></h1>
-<p class="sub">Clean architectural mask + smart cleanup workflow</p>
+<h1>BAS Generator v31 <span class="badge">FLOORPLAN BASE PREVIEW</span></h1>
+<p class="sub">Smart trace + clean floorplan shape workflow</p>
 
 <div class="tip">
-<b>v30.3 NEW:</b> Presets, recovery fallback, adaptive thresholds, blob rejection, smart gap repair, debug stats.
+<b>v31 NEW:</b> Floorplan Base preview after Mask Preview, plus v30.3 recovery presets and debug stats.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1462,8 +1462,8 @@ Auto-Detect Colors
 <small>Detects HVAC if pre-marked</small>
 </button>
 <button type="button" class="option-btn" id="maskBtn" onclick="setMode('mask')" style="border:2px solid #22d3ee;">
-&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v30.3</span>
-<small>Clean architectural mask first</small>
+&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v31</span>
+<small>Mask first, then Floorplan Base</small>
 </button>
 </div>
 
