@@ -115,6 +115,87 @@ def smart_isolate_floorplan(img):
 
 
 # ============================================================
+# v30: CLEAN ARCHITECTURAL MASK GENERATOR
+# ============================================================
+
+def generate_clean_mask(img_bgr, min_wall_thickness=2, keep_long_lines=True):
+    """v30: Generate a clean architectural mask showing ONLY walls and shape.
+
+    Strategy:
+    1. Binarize the image
+    2. Filter by connected components (remove text, small symbols, hatches)
+    3. Apply morphological operations to keep only thick lines (walls)
+    4. Remove thin lines (ducts, dimension lines, annotations)
+    5. Return a white-on-black image with only architectural geometry
+
+    Returns: clean_mask (binary image, walls=white on black background)
+    """
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape[:2]
+
+    # Step 1: Binary inverted (walls = white, background = black)
+    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+    # Step 2: Connected components filter - keep only "wall-like" elements
+    # (long aspect ratio OR large area)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    architectural = np.zeros_like(binary)
+    for i in range(1, num_labels):
+        x, y, cw, ch, area = stats[i]
+        aspect = max(cw, ch) / max(min(cw, ch), 1)
+        # Keep: long lines (aspect>4 area>120) OR large rectangles (area>1000 dim>80)
+        # OR very large blobs (the building outline itself)
+        if (aspect > 4 and area > 120) or (area > 1000 and max(cw, ch) > 80):
+            architectural[labels == i] = 255
+
+    # Step 3: Erode aggressively to remove THIN lines (ducts 1-2px) 
+    # Walls survive because they are 4-5px thick. Ducts disappear completely.
+    # Use a 3x3 kernel - anything thinner than 3px vanishes.
+    kernel_thin = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    eroded = cv2.erode(architectural, kernel_thin, iterations=1)
+
+    # Step 4: Keep only what survived erosion - these are the THICK walls
+    # Dilate back so they look solid
+    kernel_restore = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    walls_only = cv2.dilate(eroded, kernel_restore, iterations=1)
+
+    # Step 5: Second connected components pass - keep only walls of meaningful size
+    # Walls are ELONGATED but also have minimum THICKNESS (not paper-thin lines).
+    num_labels2, labels2, stats2, _ = cv2.connectedComponentsWithStats(walls_only, connectivity=8)
+    clean_mask = np.zeros_like(walls_only)
+    for i in range(1, num_labels2):
+        x, y, cw, ch, area = stats2[i]
+        aspect = max(cw, ch) / max(min(cw, ch), 1)
+        # v30: Require minimum SHORT dimension >= 4 (kills paper-thin survived ducts)
+        # AND keep elongated/large walls
+        short_dim = min(cw, ch)
+        if short_dim >= 4 and ((aspect > 3 and area > 250 and max(cw, ch) > 70) or area > 5000):
+            clean_mask[labels2 == i] = 255
+
+    # Step 6: Close small gaps in walls (e.g. where doors break them)
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+
+    return clean_mask
+
+
+def render_mask_preview(clean_mask, original_img):
+    """v30: Render the clean mask as a presentable image.
+
+    Returns a 3-channel BGR image:
+    - Background: very dark gray (like blueprint background)
+    - Walls: white/light gray (clear and visible)
+    """
+    h, w = clean_mask.shape[:2]
+    preview = np.full((h, w, 3), 32, dtype=np.uint8)  # dark blueprint bg
+
+    # Paint walls in white
+    preview[clean_mask > 0] = [240, 240, 240]
+
+    return preview
+
+
+# ============================================================
 # ARCHITECTURE DETECTION ENGINE (improved)
 # ============================================================
 
@@ -1001,11 +1082,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v29 <span class="badge">UX POLISH</span></h1>
-<p class="sub">Auto-detect + ultra-fast correction workflow</p>
+<h1>BAS Generator v30 <span class="badge">MASK PREVIEW</span></h1>
+<p class="sub">Clean architectural mask + smart cleanup workflow</p>
 
 <div class="tip">
-<b>v29 NEW:</b> Box-select drag, auto-extend on snap, SHIFT lock H/V, snap preview line. Fast editing!
+<b>v30 NEW:</b> Mask Preview Mode - generates a clean architectural mask BEFORE editing. See only walls, no HVAC noise!
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1023,6 +1104,10 @@ Smart Auto-Detect
 <button type="button" class="option-btn" id="colorBtn" onclick="setMode('color')">
 Auto-Detect Colors
 <small>Detects HVAC if pre-marked</small>
+</button>
+<button type="button" class="option-btn" id="maskBtn" onclick="setMode('mask')" style="border:2px solid #22d3ee;">
+&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v30</span>
+<small>Clean architectural mask first</small>
 </button>
 </div>
 
@@ -1048,9 +1133,75 @@ function setMode(mode){
     document.getElementById('manualBtn').classList.toggle('active', mode==='manual');
     document.getElementById('archBtn').classList.toggle('active', mode==='arch');
     document.getElementById('colorBtn').classList.toggle('active', mode==='color');
+    document.getElementById('maskBtn').classList.toggle('active', mode==='mask');
     document.getElementById('modeInput').value = mode;
 }
 </script>
+</body></html>'''
+
+
+MASK_PREVIEW_PAGE = '''<!DOCTYPE html>
+<html><head><title>Mask Preview v30</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;padding:18px;}
+.wrap{max-width:1700px;margin:0 auto;}
+.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding:14px 22px;background:#1a1d24;border-radius:12px;border:1px solid #22d3ee44;}
+.head h1{color:#22d3ee;font-size:22px;}
+.head .sub{color:#a0aec0;font-size:13px;margin-top:4px;}
+.head .badge{background:#22d3ee;color:#000;padding:3px 9px;border-radius:5px;font-size:11px;font-weight:700;margin-left:8px;}
+.actions{display:flex;gap:8px;}
+.btn{padding:10px 18px;border-radius:8px;border:none;font-size:14px;font-weight:600;cursor:pointer;}
+.btn-green{background:#16a34a;color:white;}
+.btn-orange{background:#ea580c;color:white;}
+.btn-gray{background:#333;color:white;}
+.btn:hover{transform:translateY(-1px);}
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}
+.col{background:#1a1d24;border-radius:12px;padding:14px;border:1px solid #2a2f3a;}
+.col h2{color:#a0aec0;font-size:14px;margin-bottom:10px;text-transform:uppercase;letter-spacing:1px;}
+.col img{width:100%;border-radius:8px;border:1px solid #2a2f3a;display:block;}
+.col.preview{border-color:#22d3ee66;}
+.col.preview h2{color:#22d3ee;}
+.info{background:#1a1d24;border:1px solid #facc1544;border-radius:12px;padding:14px 22px;color:#e5e5e5;font-size:14px;line-height:1.6;}
+.info b{color:#facc15;}
+.foot{text-align:center;color:#666;margin-top:18px;font-size:12px;}
+</style>
+</head><body>
+<div class="wrap">
+
+<div class="head">
+<div>
+<h1>&#10024; Architectural Mask Preview <span class="badge">v30</span></h1>
+<div class="sub">Compare original vs. clean architectural mask before editing</div>
+</div>
+<div class="actions">
+<form method="GET" action="/" style="display:inline;"><button type="submit" class="btn btn-gray">&larr; Back</button></form>
+<form method="POST" action="/mask-retry" style="display:inline;"><button type="submit" class="btn btn-orange">&#8635; Re-process</button></form>
+<form method="POST" action="/mask-approve" style="display:inline;"><button type="submit" class="btn btn-green">&#10003; Approve & Continue to Editor &rarr;</button></form>
+</div>
+</div>
+
+<div class="info">
+<b>How this works:</b> The app filtered out HVAC ducts, text, dimension lines, and symbols.
+The clean mask on the right shows ONLY the architectural walls and building shape.
+If it looks good, click <b>Approve</b> to enter the editor with this as a reference layer.
+If too much was removed, click <b>Re-process</b> to adjust filters.
+</div>
+
+<div class="compare">
+<div class="col">
+<h2>&#128247; Original Plan (Isolated)</h2>
+<img src="{{ original_b64 }}" alt="Original">
+</div>
+<div class="col preview">
+<h2>&#10024; Clean Architectural Mask</h2>
+<img src="{{ preview_b64 }}" alt="Clean Mask">
+</div>
+</div>
+
+<div class="foot">Made by Paolo V. R.</div>
+
+</div>
 </body></html>'''
 
 
@@ -2515,6 +2666,27 @@ def upload():
         except Exception as e:
             detected_message = f"Color detection error: {str(e)}."
             initial_elements = []
+    elif mode == "mask":
+        # v30: Generate clean architectural mask and show preview
+        try:
+            # First apply smart isolation (reuse existing function)
+            isolated, _crop = smart_isolate_floorplan(img)
+            cv2.imwrite(UPLOAD_IMAGE_PATH, isolated)
+            # Generate the clean architectural mask
+            clean_mask = generate_clean_mask(isolated)
+            preview = render_mask_preview(clean_mask, isolated)
+            # Save both for the preview page
+            mask_path = os.path.join(os.path.dirname(UPLOAD_IMAGE_PATH), "clean_mask.png")
+            preview_path = os.path.join(os.path.dirname(UPLOAD_IMAGE_PATH), "mask_preview.png")
+            cv2.imwrite(mask_path, clean_mask)
+            cv2.imwrite(preview_path, preview)
+            return render_template_string(
+                MASK_PREVIEW_PAGE,
+                original_b64=image_to_base64(UPLOAD_IMAGE_PATH),
+                preview_b64=image_to_base64(preview_path)
+            )
+        except Exception as e:
+            return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>Mask generation error: {str(e)}<br><a href='/' style='color:#2d89ef'>Back</a></h2>"
 
     return render_template_string(
         EDITOR_PAGE,
@@ -2534,6 +2706,45 @@ def editor():
         initial_elements=json.dumps([]),
         detected_message=""
     )
+
+
+@app.route("/mask-approve", methods=["POST"])
+def mask_approve():
+    """v30: User approved the mask preview. Enter editor with mask as visible reference."""
+    if not os.path.exists(UPLOAD_IMAGE_PATH):
+        return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No plan uploaded. <a href='/' style='color:#2d89ef'>Back</a></h2>"
+    preview_path = os.path.join(os.path.dirname(UPLOAD_IMAGE_PATH), "mask_preview.png")
+    # If mask preview exists, use it as the editor background (the clean mask)
+    # Otherwise fallback to original isolated image
+    bg_path = preview_path if os.path.exists(preview_path) else UPLOAD_IMAGE_PATH
+    return render_template_string(
+        EDITOR_PAGE,
+        image_b64=image_to_base64(bg_path),
+        initial_elements=json.dumps([]),
+        detected_message="v30 Mask Mode: clean architectural mask loaded as reference. Start tracing walls on top!"
+    )
+
+
+@app.route("/mask-retry", methods=["POST"])
+def mask_retry():
+    """v30: Re-run the mask generation (could later expose tunable params)."""
+    if not os.path.exists(UPLOAD_IMAGE_PATH):
+        return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No plan uploaded. <a href='/' style='color:#2d89ef'>Back</a></h2>"
+    try:
+        img = cv2.imread(UPLOAD_IMAGE_PATH)
+        clean_mask = generate_clean_mask(img)
+        preview = render_mask_preview(clean_mask, img)
+        mask_path = os.path.join(os.path.dirname(UPLOAD_IMAGE_PATH), "clean_mask.png")
+        preview_path = os.path.join(os.path.dirname(UPLOAD_IMAGE_PATH), "mask_preview.png")
+        cv2.imwrite(mask_path, clean_mask)
+        cv2.imwrite(preview_path, preview)
+        return render_template_string(
+            MASK_PREVIEW_PAGE,
+            original_b64=image_to_base64(UPLOAD_IMAGE_PATH),
+            preview_b64=image_to_base64(preview_path)
+        )
+    except Exception as e:
+        return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>Mask regeneration error: {str(e)}<br><a href='/' style='color:#2d89ef'>Back</a></h2>"
 
 
 @app.route("/process", methods=["POST"])
