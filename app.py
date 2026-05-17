@@ -19,14 +19,23 @@ UPLOAD_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_upload.png")
 UPLOAD_PDF_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_upload.pdf")
 CLEAN_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_clean.png")
 ISOLATED_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_isolated.png")
+# v30: Mask preview paths
+MASK_BINARY_PATH = os.path.join(UPLOAD_FOLDER, "clean_mask.png")
+MASK_PREVIEW_PATH = os.path.join(UPLOAD_FOLDER, "mask_preview.png")
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 
 def image_to_base64(path):
+    """Read an image file and return base64 string (NO data URI prefix - templates add it)."""
+    if not os.path.exists(path):
+        return ""
     with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+        data = f.read()
+    if not data:
+        return ""
+    return base64.b64encode(data).decode("utf-8")
 
 
 def pdf_to_png(pdf_path, out_path):
@@ -1082,11 +1091,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v30 <span class="badge">MASK PREVIEW</span></h1>
+<h1>BAS Generator v30.1 <span class="badge">MASK PREVIEW (FIXED)</span></h1>
 <p class="sub">Clean architectural mask + smart cleanup workflow</p>
 
 <div class="tip">
-<b>v30 NEW:</b> Mask Preview Mode - generates a clean architectural mask BEFORE editing. See only walls, no HVAC noise!
+<b>v30.1 FIX:</b> Mask preview images now render correctly (data URI prefix). Validated end-to-end.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1191,11 +1200,11 @@ If too much was removed, click <b>Re-process</b> to adjust filters.
 <div class="compare">
 <div class="col">
 <h2>&#128247; Original Plan (Isolated)</h2>
-<img src="{{ original_b64 }}" alt="Original">
+<img src="data:image/png;base64,{{ original_b64 }}" alt="Original">
 </div>
 <div class="col preview">
 <h2>&#10024; Clean Architectural Mask</h2>
-<img src="{{ preview_b64 }}" alt="Clean Mask">
+<img src="data:image/png;base64,{{ preview_b64 }}" alt="Clean Mask">
 </div>
 </div>
 
@@ -2676,17 +2685,17 @@ def upload():
             clean_mask = generate_clean_mask(isolated)
             preview = render_mask_preview(clean_mask, isolated)
             # Save both for the preview page
-            mask_path = os.path.join(os.path.dirname(UPLOAD_IMAGE_PATH), "clean_mask.png")
-            preview_path = os.path.join(os.path.dirname(UPLOAD_IMAGE_PATH), "mask_preview.png")
-            cv2.imwrite(mask_path, clean_mask)
-            cv2.imwrite(preview_path, preview)
+            cv2.imwrite(MASK_BINARY_PATH, clean_mask)
+            cv2.imwrite(MASK_PREVIEW_PATH, preview)
             return render_template_string(
                 MASK_PREVIEW_PAGE,
                 original_b64=image_to_base64(UPLOAD_IMAGE_PATH),
-                preview_b64=image_to_base64(preview_path)
+                preview_b64=image_to_base64(MASK_PREVIEW_PATH)
             )
         except Exception as e:
-            return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>Mask generation error: {str(e)}<br><a href='/' style='color:#2d89ef'>Back</a></h2>"
+            import traceback
+            tb = traceback.format_exc()
+            return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>Mask generation error: {str(e)}<br><pre style='color:#aaa;font-size:11px;'>{tb}</pre><a href='/' style='color:#2d89ef'>Back</a></h2>"
 
     return render_template_string(
         EDITOR_PAGE,
@@ -2713,10 +2722,9 @@ def mask_approve():
     """v30: User approved the mask preview. Enter editor with mask as visible reference."""
     if not os.path.exists(UPLOAD_IMAGE_PATH):
         return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No plan uploaded. <a href='/' style='color:#2d89ef'>Back</a></h2>"
-    preview_path = os.path.join(os.path.dirname(UPLOAD_IMAGE_PATH), "mask_preview.png")
     # If mask preview exists, use it as the editor background (the clean mask)
     # Otherwise fallback to original isolated image
-    bg_path = preview_path if os.path.exists(preview_path) else UPLOAD_IMAGE_PATH
+    bg_path = MASK_PREVIEW_PATH if os.path.exists(MASK_PREVIEW_PATH) else UPLOAD_IMAGE_PATH
     return render_template_string(
         EDITOR_PAGE,
         image_b64=image_to_base64(bg_path),
@@ -2732,19 +2740,21 @@ def mask_retry():
         return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No plan uploaded. <a href='/' style='color:#2d89ef'>Back</a></h2>"
     try:
         img = cv2.imread(UPLOAD_IMAGE_PATH)
+        if img is None:
+            return "<h2 style='color:white;background:#0d0f14;padding:30px;'>Could not re-read uploaded image. <a href='/' style='color:#2d89ef'>Back</a></h2>"
         clean_mask = generate_clean_mask(img)
         preview = render_mask_preview(clean_mask, img)
-        mask_path = os.path.join(os.path.dirname(UPLOAD_IMAGE_PATH), "clean_mask.png")
-        preview_path = os.path.join(os.path.dirname(UPLOAD_IMAGE_PATH), "mask_preview.png")
-        cv2.imwrite(mask_path, clean_mask)
-        cv2.imwrite(preview_path, preview)
+        cv2.imwrite(MASK_BINARY_PATH, clean_mask)
+        cv2.imwrite(MASK_PREVIEW_PATH, preview)
         return render_template_string(
             MASK_PREVIEW_PAGE,
             original_b64=image_to_base64(UPLOAD_IMAGE_PATH),
-            preview_b64=image_to_base64(preview_path)
+            preview_b64=image_to_base64(MASK_PREVIEW_PATH)
         )
     except Exception as e:
-        return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>Mask regeneration error: {str(e)}<br><a href='/' style='color:#2d89ef'>Back</a></h2>"
+        import traceback
+        tb = traceback.format_exc()
+        return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>Mask regeneration error: {str(e)}<br><pre style='color:#aaa;font-size:11px;'>{tb}</pre><a href='/' style='color:#2d89ef'>Back</a></h2>"
 
 
 @app.route("/process", methods=["POST"])
