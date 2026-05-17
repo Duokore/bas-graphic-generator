@@ -548,6 +548,112 @@ def _extract_footprint_from_original(original_img):
     return clean
 
 
+def _footprint_to_extwall(footprint):
+    """Convert a footprint mask into one editable exterior wall polygon."""
+    contours, _ = cv2.findContours(footprint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    largest = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(largest)
+    if area < 500:
+        return None
+    epsilon = max(6.0, 0.010 * cv2.arcLength(largest, True))
+    approx = cv2.approxPolyDP(largest, epsilon, True)
+    points = []
+    for p in approx.reshape(-1, 2):
+        points.append({"x": int(p[0]), "y": int(p[1])})
+    if len(points) < 3:
+        x, y, w, h = cv2.boundingRect(largest)
+        points = [
+            {"x": int(x), "y": int(y)},
+            {"x": int(x + w), "y": int(y)},
+            {"x": int(x + w), "y": int(y + h)},
+            {"x": int(x), "y": int(y + h)}
+        ]
+    return {
+        "type": "extwall",
+        "points": points,
+        "closed": True,
+        "detected": True,
+        "source": "v32_trace"
+    }
+
+
+def detect_editable_wall_trace(clean_mask, original_img=None):
+    """v32: Create an editable wall trace layer from mask/original sources.
+
+    This is not room understanding. It produces conservative vector geometry:
+    one exterior shape plus long orthogonal interior wall candidates that the
+    user can quickly move/delete/repair in the editor.
+    """
+    if clean_mask is None:
+        return []
+    if len(clean_mask.shape) == 3:
+        clean_mask = cv2.cvtColor(clean_mask, cv2.COLOR_BGR2GRAY)
+    _, wall_mask = cv2.threshold(clean_mask, 1, 255, cv2.THRESH_BINARY)
+    h, w = wall_mask.shape[:2]
+
+    elements = []
+    footprint = None
+    if original_img is not None:
+        footprint = _extract_footprint_from_original(original_img)
+        if footprint is not None and footprint.shape[:2] != wall_mask.shape[:2]:
+            footprint = cv2.resize(footprint, (w, h), interpolation=cv2.INTER_NEAREST)
+    if footprint is None:
+        close_size = max(17, int(max(h, w) * 0.020))
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (close_size, close_size))
+        footprint = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, k, iterations=2)
+
+    extwall = _footprint_to_extwall(footprint)
+    if extwall:
+        elements.append(extwall)
+
+    # Major interior wall candidates only. Keep this conservative, with a
+    # fallback to normal line extraction if the plan is too faint/fragmented.
+    major_lines_mask = _extract_visual_wall_lines(wall_mask, major_only=True)
+    if np.count_nonzero(major_lines_mask) < max(150, int(np.count_nonzero(wall_mask) * 0.015)):
+        major_lines_mask = _extract_visual_wall_lines(wall_mask, major_only=False)
+    shell = np.zeros_like(wall_mask)
+    if footprint is not None:
+        shell_size = max(9, int(max(h, w) * 0.012))
+        shell_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (shell_size, shell_size))
+        shell = cv2.subtract(footprint, cv2.erode(footprint, shell_kernel, iterations=1))
+        major_lines_mask = cv2.bitwise_and(
+            major_lines_mask,
+            cv2.bitwise_not(cv2.dilate(shell, shell_kernel, iterations=1))
+        )
+
+    raw_lines = detect_walls_hough(
+        major_lines_mask,
+        min_line_length=max(55, int(max(h, w) * 0.060)),
+        max_line_gap=max(12, int(max(h, w) * 0.018))
+    )
+    snapped = snap_to_orthogonal(raw_lines, angle_tolerance=7)
+    merged = merge_collinear_lines(snapped, distance_threshold=max(10, int(max(h, w) * 0.012)))
+
+    min_len = max(70, int(max(h, w) * 0.075))
+    max_walls = 80
+    wall_lines = []
+    for line in merged:
+        x1, y1, x2, y2 = [int(v) for v in line]
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length < min_len:
+            continue
+        wall_lines.append((length, [x1, y1, x2, y2]))
+    wall_lines.sort(reverse=True, key=lambda item: item[0])
+
+    for _length, line in wall_lines[:max_walls]:
+        x1, y1, x2, y2 = line
+        elements.append({
+            "type": "intwall",
+            "points": [{"x": x1, "y": y1}, {"x": x2, "y": y2}],
+            "detected": True,
+            "source": "v32_trace"
+        })
+
+    return elements
+
+
 def render_floorplan_shape_base(clean_mask, original_img=None, source_mode="hybrid"):
     """v31: Render a first-pass BAS-style floorplan base from the clean mask.
 
@@ -1563,11 +1669,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v31.4 <span class="badge">HYBRID FOOTPRINT</span></h1>
+<h1>BAS Generator v32 <span class="badge">AUTO TRACE LAYER</span></h1>
 <p class="sub">Smart trace + clean floorplan shape workflow</p>
 
 <div class="tip">
-<b>v31.4 NEW:</b> Floorplan Base can use original-plan footprint plus mask-based major walls for tougher drawings.
+<b>v32 NEW:</b> Auto Trace Editor creates editable exterior shape and major wall lines after Mask Preview.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1587,7 +1693,7 @@ Auto-Detect Colors
 <small>Detects HVAC if pre-marked</small>
 </button>
 <button type="button" class="option-btn" id="maskBtn" onclick="setMode('mask')" style="border:2px solid #22d3ee;">
-&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v31.4</span>
+&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v32</span>
 <small>Mask first, then Floorplan Base</small>
 </button>
 </div>
@@ -1652,7 +1758,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 
 <div class="head">
 <div>
-<h1>&#10024; Architectural Mask Preview <span class="badge">v31.4</span></h1>
+<h1>&#10024; Architectural Mask Preview <span class="badge">v32</span></h1>
 <div class="sub">Compare original vs. clean architectural mask before editing</div>
 </div>
 <div class="actions">
@@ -1661,6 +1767,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 <form method="POST" action="/mask-retry" style="display:inline;"><input type="hidden" name="mask_preset" value="mechanical_dense"><button type="submit" class="btn btn-orange">Mechanical Dense</button></form>
 <form method="POST" action="/mask-retry" style="display:inline;"><input type="hidden" name="mask_preset" value="thin_scan"><button type="submit" class="btn btn-orange">Thin Scan</button></form>
 <form method="POST" action="/floorplan-base" style="display:inline;"><button type="submit" class="btn btn-gray">Floorplan Base</button></form>
+<form method="POST" action="/trace-editor" style="display:inline;"><button type="submit" class="btn btn-gray">Auto Trace Editor</button></form>
 <form method="POST" action="/mask-approve" style="display:inline;"><button type="submit" class="btn btn-green">&#10003; Approve & Continue to Editor &rarr;</button></form>
 </div>
 </div>
@@ -1717,7 +1824,7 @@ body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;mi
 <div class="wrap">
 <div class="head">
 <div>
-<h1>Floorplan Shape Base <span class="badge">v31.4 preview</span></h1>
+<h1>Floorplan Shape Base <span class="badge">v32 preview</span></h1>
 <div class="sub">First visual pass: same floorplan shape, cleaner BAS-style base</div>
 </div>
 <div class="actions">
@@ -1726,6 +1833,7 @@ body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;mi
 <form method="POST" action="/floorplan-base" style="display:inline;"><input type="hidden" name="base_source" value="mask"><button type="submit" class="btn btn-gray">Mask Source</button></form>
 <form method="POST" action="/floorplan-base" style="display:inline;"><input type="hidden" name="base_source" value="original"><button type="submit" class="btn btn-gray">Original Source</button></form>
 <form method="POST" action="/mask-approve" style="display:inline;"><button type="submit" class="btn btn-blue">Back to Mask Editor Flow</button></form>
+<form method="POST" action="/trace-editor" style="display:inline;"><button type="submit" class="btn btn-blue">Auto Trace Editor</button></form>
 <form method="POST" action="/floorplan-base-approve" style="display:inline;"><button type="submit" class="btn btn-green">Use This Base in Editor &rarr;</button></form>
 </div>
 </div>
@@ -3286,6 +3394,35 @@ def floorplan_base_approve():
         initial_elements=json.dumps([]),
         detected_message="v31 Floorplan Base: clean BAS-style shape loaded as reference. Next step is fast cleanup/editing tools."
     )
+
+
+@app.route("/trace-editor", methods=["POST"])
+def trace_editor():
+    """v32: Open editor with an editable auto-traced wall layer."""
+    if not os.path.exists(MASK_BINARY_PATH):
+        return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No mask found. Run Mask Preview first. <a href='/' style='color:#2d89ef'>Back</a></h2>"
+    try:
+        clean_mask = cv2.imread(MASK_BINARY_PATH, cv2.IMREAD_GRAYSCALE)
+        original_img = cv2.imread(UPLOAD_IMAGE_PATH) if os.path.exists(UPLOAD_IMAGE_PATH) else None
+        if clean_mask is None:
+            return "<h2 style='color:white;background:#0d0f14;padding:30px;'>Could not read clean mask. <a href='/' style='color:#2d89ef'>Back</a></h2>"
+        elements = detect_editable_wall_trace(clean_mask, original_img=original_img)
+        n_ext = sum(1 for e in elements if e.get("type") == "extwall")
+        n_int = sum(1 for e in elements if e.get("type") == "intwall")
+        bg_path = UPLOAD_IMAGE_PATH if os.path.exists(UPLOAD_IMAGE_PATH) else MASK_PREVIEW_PATH
+        return render_template_string(
+            EDITOR_PAGE,
+            image_b64=image_to_base64(bg_path),
+            initial_elements=json.dumps(elements),
+            detected_message=(
+                f"v32 Auto Trace Layer: {n_ext} exterior shape + {n_int} major editable wall lines. "
+                "Use Move/Delete/Box Erase/Snap Walls to clean quickly."
+            )
+        )
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>Auto trace error: {str(e)}<br><pre style='color:#aaa;font-size:11px;'>{tb}</pre><a href='/' style='color:#2d89ef'>Back</a></h2>"
 
 
 @app.route("/mask-approve", methods=["POST"])
