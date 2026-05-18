@@ -203,12 +203,14 @@ def run_openai_floorplan_clean():
         client = OpenAI(api_key=api_key)
         model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1").strip()
         size = os.environ.get("OPENAI_IMAGE_SIZE", "1536x1024").strip()
+        quality = os.environ.get("OPENAI_IMAGE_QUALITY", "medium").strip()
         with open(AI_CLEAN_INPUT_PATH, "rb") as image_file:
             result = client.images.edit(
                 model=model,
                 image=image_file,
                 prompt=prompt,
                 size=size,
+                quality=quality,
             )
         image_b64 = None
         if getattr(result, "data", None):
@@ -217,7 +219,7 @@ def run_openai_floorplan_clean():
             return False, "OpenAI returned no image data. Try again or check OPENAI_IMAGE_MODEL.", model
         with open(AI_CLEAN_OUTPUT_PATH, "wb") as f:
             f.write(base64.b64decode(image_b64))
-        return True, "AI Clean Floorplan generated. Review it before using it as the editor base.", model
+        return True, "AI Clean Floorplan generated. Review it before using it as the editor base.", f"{model}, quality={quality}, size={size}"
     except Exception as e:
         return False, (
             "AI Clean Floorplan failed while calling OpenAI.\n\n"
@@ -3771,6 +3773,19 @@ def require_login():
     if request.cookies.get("bas_auth") == APP_PASSWORD:
         return
     return redirect("/login")
+
+
+@app.errorhandler(Exception)
+def show_unhandled_error(e):
+    """Show a readable traceback instead of a blank Render 500 page while this app is in active development."""
+    import traceback
+    tb = traceback.format_exc()
+    return (
+        "<h2 style='color:white;background:#0d0f14;padding:30px;'>"
+        f"Unhandled server error: {str(e)}<br>"
+        f"<pre style='color:#aaa;font-size:11px;white-space:pre-wrap;'>{tb}</pre>"
+        "<a href='/' style='color:#2d89ef'>Back</a></h2>"
+    ), 500
 
 
 @app.route("/")
