@@ -157,7 +157,7 @@ def run_claude_plan_review():
         )
 
 
-def run_openai_floorplan_clean():
+def run_openai_floorplan_clean(clean_style="conservative"):
     """v35: Ask an image model to visually clean a mechanical plan into an architectural base."""
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -189,15 +189,27 @@ def run_openai_floorplan_clean():
         img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     cv2.imwrite(AI_CLEAN_INPUT_PATH, img)
 
-    prompt = (
-        "Clean this mechanical HVAC floorplan into a black-and-white architectural floorplan. "
+    base_prompt = (
+        "Clean this mechanical HVAC floorplan into a clean architectural reference plan. "
+        "The most important rule is accuracy: preserve the existing building footprint, exterior walls, "
+        "interior walls, corridors, open areas, door openings, stairs, shafts, room proportions, and orientation. "
         "Remove HVAC ducts, equipment tags, VAV symbols, diffusers, mechanical annotations, text notes, "
-        "ceiling grid, hatches, and construction clutter. Preserve the exact building footprint, exterior walls, "
-        "interior walls, corridors, door openings, stairs, shafts, open areas, room proportions, and orientation. "
-        "Do not redesign the building. Do not invent rooms. Do not add furniture. "
-        "Output only a clean top-down architectural drafting style floorplan on a white background, "
-        "with crisp black/gray wall lines and clear door openings."
+        "ceiling grid clutter, and construction noise. "
+        "Do not redesign the building. Do not invent offices, rooms, walls, corridors, doors, windows, or closets. "
+        "If an area is unclear because HVAC/mechanical lines cover it, leave it as an open blank area or a light gray/hatched unknown zone. "
+        "Do not convert rows of diffusers, duct branches, or ceiling grid cells into offices. "
+        "Keep large hatched/gray service zones as hatched/gray zones when they exist in the original. "
+        "Output a clean top-down architectural drafting style plan on a white background with crisp black/gray wall lines."
     )
+    if clean_style == "layout":
+        prompt = (
+            base_prompt + " After cleaning, simplify only obvious wall geometry into a readable BAS-style layout. "
+            "Still do not add rooms that are not clearly visible in the original."
+        )
+    else:
+        prompt = (
+            base_prompt + " Be conservative: when uncertain, preserve open space or hatching instead of adding walls."
+        )
 
     try:
         client = OpenAI(api_key=api_key)
@@ -219,7 +231,7 @@ def run_openai_floorplan_clean():
             return False, "OpenAI returned no image data. Try again or check OPENAI_IMAGE_MODEL.", model
         with open(AI_CLEAN_OUTPUT_PATH, "wb") as f:
             f.write(base64.b64decode(image_b64))
-        return True, "AI Clean Floorplan generated. Review it before using it as the editor base.", f"{model}, quality={quality}, size={size}"
+        return True, "AI Clean Floorplan generated. Review it before using it as the editor base.", f"{model}, quality={quality}, size={size}, style={clean_style}"
     except Exception as e:
         return False, (
             "AI Clean Floorplan failed while calling OpenAI.\n\n"
@@ -2170,7 +2182,8 @@ h1{color:#4c1d95;font-size:22px;}
 </div>
 <div class="actions">
 <form method="GET" action="/" style="display:inline;"><button type="submit" class="btn btn-gray">&larr; New Upload</button></form>
-<form method="POST" action="/ai-clean-floorplan" style="display:inline;"><button type="submit" class="btn btn-purple">Retry AI Clean</button></form>
+<form method="POST" action="/ai-clean-floorplan" style="display:inline;"><input type="hidden" name="ai_clean_style" value="conservative"><button type="submit" class="btn btn-purple">Retry Conservative</button></form>
+<form method="POST" action="/ai-clean-floorplan" style="display:inline;"><input type="hidden" name="ai_clean_style" value="layout"><button type="submit" class="btn btn-blue">Retry Layout</button></form>
 <form method="POST" action="/mask-retry" style="display:inline;"><input type="hidden" name="mask_preset" value="balanced"><button type="submit" class="btn btn-blue">Back to Mask</button></form>
 <form method="POST" action="/ai-clean-approve" style="display:inline;"><button type="submit" class="btn btn-green">Use AI Clean in Editor &rarr;</button></form>
 </div>
@@ -3888,7 +3901,7 @@ def upload():
         try:
             isolated, _crop = smart_isolate_floorplan(img)
             cv2.imwrite(UPLOAD_IMAGE_PATH, isolated)
-            ok, status_text, model_used = run_openai_floorplan_clean()
+            ok, status_text, model_used = run_openai_floorplan_clean(clean_style="conservative")
             if model_used:
                 status_text = f"{status_text}\n\nModel: {model_used}"
             return render_template_string(
@@ -3941,7 +3954,8 @@ def claude_review():
 def ai_clean_floorplan():
     """v35: Generate an AI-cleaned architectural floorplan image."""
     try:
-        ok, status_text, model_used = run_openai_floorplan_clean()
+        clean_style = request.form.get("ai_clean_style", "conservative")
+        ok, status_text, model_used = run_openai_floorplan_clean(clean_style=clean_style)
         if model_used:
             status_text = f"{status_text}\n\nModel: {model_used}"
         return render_template_string(
