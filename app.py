@@ -3433,6 +3433,7 @@ function cabinetProject(x, y, z){
 function generateSVG(){
     const elements = data.elements || [];
     const extWall = elements.find(e => e.type === 'extwall' && e.points && e.points.length >= 3);
+    const hasRasterFloor = !!data.background_image_b64;
     let minX = 0, maxX = data.image_width, minY = 0, maxY = data.image_height;
     if(extWall){
         const xs = extWall.points.map(p => p.x);
@@ -3514,6 +3515,13 @@ function generateSVG(){
     svg += `<feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>`;
     svg += `</filter>`;
     svg += `</defs>`;
+
+    if(hasRasterFloor){
+        const tl = projSVG(-bcx, -bcy, 0);
+        const floorW = data.image_width;
+        const floorH = data.image_height * 0.72;
+        svg += `<image href="data:image/png;base64,${data.background_image_b64}" x="${tl[0]}" y="${tl[1]}" width="${floorW}" height="${floorH}" preserveAspectRatio="none" opacity="0.96"/>`;
+    }
 
     if(extWall){
         const pts = extWall.points.map(p => toLocal(p));
@@ -4099,6 +4107,13 @@ def result():
         return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No data. <a href='/' style='color:#2d89ef'>Start over</a></h2>"
 
     elements = detection.get("elements", [])
+    if os.path.exists(AI_CLEAN_OUTPUT_PATH):
+        bg_img = cv2.imread(AI_CLEAN_OUTPUT_PATH)
+        if bg_img is not None:
+            detection["background_image_b64"] = image_to_base64(AI_CLEAN_OUTPUT_PATH)
+            detection["background_source"] = "ai_clean"
+            detection["background_width"] = int(bg_img.shape[1])
+            detection["background_height"] = int(bg_img.shape[0])
     n_vavs = sum(1 for e in elements if e.get("type") == "vav")
     n_ahus = sum(1 for e in elements if e.get("type") == "ahu")
     n_ducts = sum(1 for e in elements if e.get("type") == "duct")
