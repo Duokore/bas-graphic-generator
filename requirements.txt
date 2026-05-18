@@ -5,3 +5,4 @@ pymupdf
 svgwrite
 gunicorn
 anthropic
+openai

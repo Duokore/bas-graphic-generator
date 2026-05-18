@@ -23,6 +23,8 @@ ISOLATED_IMAGE_PATH = os.path.join(UPLOAD_FOLDER, "mechanical_isolated.png")
 MASK_BINARY_PATH = os.path.join(UPLOAD_FOLDER, "clean_mask.png")
 MASK_PREVIEW_PATH = os.path.join(UPLOAD_FOLDER, "mask_preview.png")
 FLOORPLAN_BASE_PATH = os.path.join(OUTPUT_FOLDER, "floorplan_shape_base.png")
+AI_CLEAN_INPUT_PATH = os.path.join(UPLOAD_FOLDER, "ai_clean_input.png")
+AI_CLEAN_OUTPUT_PATH = os.path.join(OUTPUT_FOLDER, "ai_clean_floorplan.png")
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -153,6 +155,75 @@ def run_claude_plan_review():
             "Check that ANTHROPIC_API_KEY is valid, Render has network access, and the model name is supported. "
             "You can override the model with ANTHROPIC_MODEL in Render."
         )
+
+
+def run_openai_floorplan_clean():
+    """v35: Ask an image model to visually clean a mechanical plan into an architectural base."""
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return False, (
+            "OPENAI_API_KEY is not set in Render.\n\n"
+            "Add OPENAI_API_KEY to Render Environment Variables to use AI Clean Floorplan."
+        ), ""
+
+    if not os.path.exists(UPLOAD_IMAGE_PATH):
+        return False, "No uploaded plan found. Upload a PDF or PNG first.", ""
+
+    try:
+        from openai import OpenAI
+    except Exception as e:
+        return False, (
+            "The openai package could not be imported.\n\n"
+            f"Python error: {e}\n\n"
+            "Make sure requirements.txt includes openai and redeploy Render."
+        ), ""
+
+    img = cv2.imread(UPLOAD_IMAGE_PATH)
+    if img is None:
+        return False, "Could not read the uploaded plan image.", ""
+
+    max_dim = int(os.environ.get("AI_CLEAN_MAX_DIM", "1536"))
+    h, w = img.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    cv2.imwrite(AI_CLEAN_INPUT_PATH, img)
+
+    prompt = (
+        "Clean this mechanical HVAC floorplan into a black-and-white architectural floorplan. "
+        "Remove HVAC ducts, equipment tags, VAV symbols, diffusers, mechanical annotations, text notes, "
+        "ceiling grid, hatches, and construction clutter. Preserve the exact building footprint, exterior walls, "
+        "interior walls, corridors, door openings, stairs, shafts, open areas, room proportions, and orientation. "
+        "Do not redesign the building. Do not invent rooms. Do not add furniture. "
+        "Output only a clean top-down architectural drafting style floorplan on a white background, "
+        "with crisp black/gray wall lines and clear door openings."
+    )
+
+    try:
+        client = OpenAI(api_key=api_key)
+        model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1").strip()
+        size = os.environ.get("OPENAI_IMAGE_SIZE", "1536x1024").strip()
+        with open(AI_CLEAN_INPUT_PATH, "rb") as image_file:
+            result = client.images.edit(
+                model=model,
+                image=image_file,
+                prompt=prompt,
+                size=size,
+            )
+        image_b64 = None
+        if getattr(result, "data", None):
+            image_b64 = getattr(result.data[0], "b64_json", None)
+        if not image_b64:
+            return False, "OpenAI returned no image data. Try again or check OPENAI_IMAGE_MODEL.", model
+        with open(AI_CLEAN_OUTPUT_PATH, "wb") as f:
+            f.write(base64.b64decode(image_b64))
+        return True, "AI Clean Floorplan generated. Review it before using it as the editor base.", model
+    except Exception as e:
+        return False, (
+            "AI Clean Floorplan failed while calling OpenAI.\n\n"
+            f"Error: {e}\n\n"
+            "Check OPENAI_API_KEY, OPENAI_IMAGE_MODEL, image size, and account billing."
+        ), os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
 
 def pdf_to_png(pdf_path, out_path):
@@ -1877,11 +1948,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v33 <span class="badge">ROOM TOOLBOX</span></h1>
-<p class="sub">Smart trace + clean floorplan shape workflow</p>
+<h1>BAS Generator v35 <span class="badge">AI CLEAN</span></h1>
+<p class="sub">AI clean floorplan + smart cleanup workflow</p>
 
 <div class="tip">
-<b>v33 NEW:</b> Room Rect toolbox, short-line cleanup, exterior-only cleanup, and faster manual floorplan building.
+<b>v35 NEW:</b> AI Clean Floorplan mode. Generate a cleaner architectural base before tracing/editing.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1903,6 +1974,10 @@ Auto-Detect Colors
 <button type="button" class="option-btn" id="maskBtn" onclick="setMode('mask')" style="border:2px solid #22d3ee;">
 &#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v33</span>
 <small>Mask first, then Floorplan Base</small>
+</button>
+<button type="button" class="option-btn" id="aiCleanBtn" onclick="setMode('ai_clean')" style="border:2px solid #a855f7;">
+AI Clean <span style="background:#a855f7;color:#fff;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">v35</span>
+<small>Clean image first</small>
 </button>
 </div>
 
@@ -1929,6 +2004,7 @@ function setMode(mode){
     document.getElementById('archBtn').classList.toggle('active', mode==='arch');
     document.getElementById('colorBtn').classList.toggle('active', mode==='color');
     document.getElementById('maskBtn').classList.toggle('active', mode==='mask');
+    document.getElementById('aiCleanBtn').classList.toggle('active', mode==='ai_clean');
     document.getElementById('modeInput').value = mode;
 }
 </script>
@@ -1979,6 +2055,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 <form method="POST" action="/trace-editor" style="display:inline;"><input type="hidden" name="trace_mode" value="light"><button type="submit" class="btn btn-gray">Trace Light</button></form>
 <form method="POST" action="/trace-editor" style="display:inline;"><input type="hidden" name="trace_mode" value="medium"><button type="submit" class="btn btn-gray">Trace Medium</button></form>
 <form method="POST" action="/trace-editor" style="display:inline;"><input type="hidden" name="trace_mode" value="detailed"><button type="submit" class="btn btn-gray">Trace Detailed</button></form>
+<form method="POST" action="/ai-clean-floorplan" style="display:inline;"><button type="submit" class="btn btn-purple">AI Clean</button></form>
 <form method="POST" action="/claude-review" style="display:inline;"><button type="submit" class="btn btn-purple">Claude Review</button></form>
 <form method="POST" action="/mask-approve" style="display:inline;"><button type="submit" class="btn btn-green">&#10003; Approve & Continue to Editor &rarr;</button></form>
 </div>
@@ -2059,6 +2136,66 @@ This does not replace the trace engine. It reviews the current original/mask/bas
 </body></html>'''
 
 
+AI_CLEAN_PAGE = '''<!DOCTYPE html>
+<html><head><title>AI Clean Floorplan v35</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;padding:18px;}
+.wrap{max-width:1700px;margin:0 auto;}
+.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding:14px 22px;background:white;border-radius:12px;border:1px solid #d8dee8;box-shadow:0 8px 24px rgba(15,23,42,0.08);}
+h1{color:#4c1d95;font-size:22px;}
+.sub{color:#64748b;font-size:13px;margin-top:4px;}
+.badge{background:#7c3aed;color:white;padding:3px 9px;border-radius:5px;font-size:11px;font-weight:700;margin-left:8px;}
+.actions{display:flex;gap:8px;flex-wrap:wrap;}
+.btn{padding:10px 18px;border-radius:8px;border:none;font-size:14px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block;}
+.btn-gray{background:#e5e7eb;color:#111827;}
+.btn-blue{background:#2563eb;color:white;}
+.btn-green{background:#16a34a;color:white;}
+.btn-purple{background:#7c3aed;color:white;}
+.info{background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:12px 18px;color:#7c2d12;font-size:14px;margin-bottom:14px;white-space:pre-wrap;}
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}
+.col{background:white;border:1px solid #d8dee8;border-radius:12px;padding:14px;box-shadow:0 8px 24px rgba(15,23,42,0.08);}
+.col h2{font-size:13px;letter-spacing:1px;text-transform:uppercase;color:#475569;margin-bottom:10px;}
+.col img{width:100%;display:block;border-radius:8px;border:1px solid #cbd5e1;background:white;}
+.foot{text-align:center;color:#94a3b8;margin-top:18px;font-size:12px;}
+@media(max-width:900px){.compare{grid-template-columns:1fr;}.head{align-items:flex-start;flex-direction:column;gap:12px;}}
+</style></head><body>
+<div class="wrap">
+<div class="head">
+<div>
+<h1>AI Clean Floorplan <span class="badge">v35 preview</span></h1>
+<div class="sub">Visual cleanup pass before BAS tracing/editing</div>
+</div>
+<div class="actions">
+<form method="GET" action="/" style="display:inline;"><button type="submit" class="btn btn-gray">&larr; New Upload</button></form>
+<form method="POST" action="/ai-clean-floorplan" style="display:inline;"><button type="submit" class="btn btn-purple">Retry AI Clean</button></form>
+<form method="POST" action="/mask-retry" style="display:inline;"><input type="hidden" name="mask_preset" value="balanced"><button type="submit" class="btn btn-blue">Back to Mask</button></form>
+<form method="POST" action="/ai-clean-approve" style="display:inline;"><button type="submit" class="btn btn-green">Use AI Clean in Editor &rarr;</button></form>
+</div>
+</div>
+
+<div class="info">{{ status_text }}</div>
+
+<div class="compare">
+<div class="col">
+<h2>Original Isolated Plan</h2>
+<img src="data:image/png;base64,{{ original_b64 }}" alt="Original">
+</div>
+<div class="col">
+<h2>AI Cleaned Floorplan</h2>
+{% if clean_b64 %}
+<img src="data:image/png;base64,{{ clean_b64 }}" alt="AI Clean">
+{% else %}
+<div style="padding:80px 20px;text-align:center;color:#64748b;background:#f8fafc;border-radius:8px;">No AI clean image generated yet.</div>
+{% endif %}
+</div>
+</div>
+
+<div class="foot">Made by Paolo V. R.</div>
+</div>
+</body></html>'''
+
+
 FLOORPLAN_BASE_PAGE = '''<!DOCTYPE html>
 <html><head><title>Floorplan Base v31</title>
 <style>
@@ -2095,6 +2232,7 @@ body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;mi
 <form method="POST" action="/mask-approve" style="display:inline;"><button type="submit" class="btn btn-blue">Back to Mask Editor Flow</button></form>
 <form method="POST" action="/trace-editor" style="display:inline;"><input type="hidden" name="trace_mode" value="light"><button type="submit" class="btn btn-blue">Trace Light</button></form>
 <form method="POST" action="/trace-editor" style="display:inline;"><input type="hidden" name="trace_mode" value="medium"><button type="submit" class="btn btn-blue">Trace Medium</button></form>
+<form method="POST" action="/ai-clean-floorplan" style="display:inline;"><button type="submit" class="btn btn-purple">AI Clean</button></form>
 <form method="POST" action="/claude-review" style="display:inline;"><button type="submit" class="btn btn-purple">Claude Review</button></form>
 <form method="POST" action="/floorplan-base-approve" style="display:inline;"><button type="submit" class="btn btn-green">Use This Base in Editor &rarr;</button></form>
 </div>
@@ -3723,6 +3861,23 @@ def upload():
             import traceback
             tb = traceback.format_exc()
             return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>Mask generation error: {str(e)}<br><pre style='color:#aaa;font-size:11px;'>{tb}</pre><a href='/' style='color:#2d89ef'>Back</a></h2>"
+    elif mode == "ai_clean":
+        try:
+            isolated, _crop = smart_isolate_floorplan(img)
+            cv2.imwrite(UPLOAD_IMAGE_PATH, isolated)
+            ok, status_text, model_used = run_openai_floorplan_clean()
+            if model_used:
+                status_text = f"{status_text}\n\nModel: {model_used}"
+            return render_template_string(
+                AI_CLEAN_PAGE,
+                status_text=status_text,
+                original_b64=image_to_base64(UPLOAD_IMAGE_PATH),
+                clean_b64=image_to_base64(AI_CLEAN_OUTPUT_PATH) if ok else ""
+            )
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>AI Clean error: {str(e)}<br><pre style='color:#aaa;font-size:11px;'>{tb}</pre><a href='/' style='color:#2d89ef'>Back</a></h2>"
 
     return render_template_string(
         EDITOR_PAGE,
@@ -3757,6 +3912,38 @@ def claude_review():
         import traceback
         tb = traceback.format_exc()
         return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>Claude Review error: {str(e)}<br><pre style='color:#aaa;font-size:11px;'>{tb}</pre><a href='/' style='color:#2d89ef'>Back</a></h2>"
+
+
+@app.route("/ai-clean-floorplan", methods=["POST"])
+def ai_clean_floorplan():
+    """v35: Generate an AI-cleaned architectural floorplan image."""
+    try:
+        ok, status_text, model_used = run_openai_floorplan_clean()
+        if model_used:
+            status_text = f"{status_text}\n\nModel: {model_used}"
+        return render_template_string(
+            AI_CLEAN_PAGE,
+            status_text=status_text,
+            original_b64=image_to_base64(UPLOAD_IMAGE_PATH),
+            clean_b64=image_to_base64(AI_CLEAN_OUTPUT_PATH) if ok else ""
+        )
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>AI Clean error: {str(e)}<br><pre style='color:#aaa;font-size:11px;'>{tb}</pre><a href='/' style='color:#2d89ef'>Back</a></h2>"
+
+
+@app.route("/ai-clean-approve", methods=["POST"])
+def ai_clean_approve():
+    """Use the AI-cleaned floorplan as the editor background."""
+    if not os.path.exists(AI_CLEAN_OUTPUT_PATH):
+        return "<h2 style='color:white;background:#0d0f14;padding:30px;'>No AI Clean floorplan generated. <a href='/' style='color:#2d89ef'>Back</a></h2>"
+    return render_template_string(
+        EDITOR_PAGE,
+        image_b64=image_to_base64(AI_CLEAN_OUTPUT_PATH),
+        initial_elements=json.dumps([]),
+        detected_message="v35 AI Clean Floorplan loaded as reference. Add/edit rooms, walls, ducts, VAVs, AHU, and diffusers on top."
+    )
 
 
 @app.route("/floorplan-base", methods=["POST"])
