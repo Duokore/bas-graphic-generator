@@ -114,17 +114,38 @@ def run_claude_plan_review():
 
     try:
         client = Anthropic(api_key=api_key)
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
-        message = client.messages.create(
-            model=model,
-            max_tokens=900,
-            messages=[{"role": "user", "content": content}]
-        )
+        configured_model = os.environ.get("ANTHROPIC_MODEL", "").strip()
+        model_candidates = [
+            configured_model,
+            "claude-sonnet-4-20250514",
+            "claude-3-7-sonnet-20250219",
+            "claude-3-5-haiku-20241022",
+            "claude-3-haiku-20240307",
+        ]
+        last_error = None
+        message = None
+        used_model = None
+        for model in [m for m in model_candidates if m]:
+            try:
+                message = client.messages.create(
+                    model=model,
+                    max_tokens=900,
+                    messages=[{"role": "user", "content": content}]
+                )
+                used_model = model
+                break
+            except Exception as e:
+                last_error = e
+                if "not_found_error" not in str(e) and "model:" not in str(e):
+                    raise
+        if message is None:
+            raise last_error or RuntimeError("No Claude model candidate worked.")
         parts = []
         for block in message.content:
             if getattr(block, "type", "") == "text":
                 parts.append(block.text)
-        return "\n\n".join(parts).strip() or "Claude returned no text response."
+        review = "\n\n".join(parts).strip() or "Claude returned no text response."
+        return f"Model used: {used_model}\n\n{review}"
     except Exception as e:
         return (
             "Claude Review failed while calling the API.\n\n"
