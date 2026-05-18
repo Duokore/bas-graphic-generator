@@ -117,10 +117,10 @@ def run_claude_plan_review():
         configured_model = os.environ.get("ANTHROPIC_MODEL", "").strip()
         model_candidates = [
             configured_model,
-            "claude-sonnet-4-20250514",
-            "claude-3-7-sonnet-20250219",
-            "claude-3-5-haiku-20241022",
-            "claude-3-haiku-20240307",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
         ]
         last_error = None
         message = None
