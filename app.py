@@ -39,6 +39,101 @@ def image_to_base64(path):
     return base64.b64encode(data).decode("utf-8")
 
 
+def _claude_image_block(path):
+    """Build a Claude vision image block from a local PNG/JPG path."""
+    if not os.path.exists(path):
+        return None
+    ext = os.path.splitext(path)[1].lower()
+    media_type = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+    data = image_to_base64(path)
+    if not data:
+        return None
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": data
+        }
+    }
+
+
+def run_claude_plan_review():
+    """v34: Ask Claude to review current plan artifacts and recommend the next workflow step."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return (
+            "ANTHROPIC_API_KEY is not set in this environment.\n\n"
+            "Add it in Render Environment Variables, redeploy, then try Claude Review again."
+        )
+
+    try:
+        from anthropic import Anthropic
+    except Exception as e:
+        return (
+            "The anthropic package could not be imported.\n\n"
+            f"Python error: {e}\n\n"
+            "Make sure requirements.txt includes anthropic and redeploy Render."
+        )
+
+    content = [{
+        "type": "text",
+        "text": (
+            "You are reviewing an AI-assisted BAS/HVAC graphics generation workflow.\n"
+            "This is NOT BIM reconstruction and NOT a generic CAD app.\n"
+            "Goal: Smart Trace + Smart Cleanup for BAS graphics inspired by Trane Tracer Synchrony.\n\n"
+            "Review the attached images if present:\n"
+            "1. Original isolated mechanical floorplan.\n"
+            "2. Clean architectural mask preview.\n"
+            "3. BAS-style floorplan base preview.\n\n"
+            "Give short, practical recommendations for a controls technician workflow:\n"
+            "- Is the exterior footprint usable or not?\n"
+            "- Is the interior trace too noisy, too empty, or acceptable?\n"
+            "- Which mode should be used next: Balanced, Mechanical Dense, Thin Scan, Floorplan Base, Trace Light, Trace Medium, Trace Detailed, Keep Exterior Only, Clear Interior Trace, or Room Rect?\n"
+            "- What should the user clean manually first?\n"
+            "- Do not invent exact geometry. Do not promise perfect room detection.\n"
+            "- Keep the answer in Spanish, direct, and under 12 bullets."
+        )
+    }]
+
+    image_paths = [
+        ("Original isolated plan", UPLOAD_IMAGE_PATH),
+        ("Clean mask preview", MASK_PREVIEW_PATH),
+        ("Floorplan base preview", FLOORPLAN_BASE_PATH),
+    ]
+    attached = []
+    for label, path in image_paths:
+        block = _claude_image_block(path)
+        if block:
+            content.append({"type": "text", "text": f"Image: {label}"})
+            content.append(block)
+            attached.append(label)
+
+    if not attached:
+        return "No plan images were found yet. Upload a plan and run Mask Preview first."
+
+    try:
+        client = Anthropic(api_key=api_key)
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+        message = client.messages.create(
+            model=model,
+            max_tokens=900,
+            messages=[{"role": "user", "content": content}]
+        )
+        parts = []
+        for block in message.content:
+            if getattr(block, "type", "") == "text":
+                parts.append(block.text)
+        return "\n\n".join(parts).strip() or "Claude returned no text response."
+    except Exception as e:
+        return (
+            "Claude Review failed while calling the API.\n\n"
+            f"Error: {e}\n\n"
+            "Check that ANTHROPIC_API_KEY is valid, Render has network access, and the model name is supported. "
+            "You can override the model with ANTHROPIC_MODEL in Render."
+        )
+
+
 def pdf_to_png(pdf_path, out_path):
     doc = fitz.open(pdf_path)
     page = doc[0]
@@ -1834,6 +1929,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 .btn-green{background:#16a34a;color:white;}
 .btn-orange{background:#ea580c;color:white;}
 .btn-gray{background:#333;color:white;}
+.btn-purple{background:#7c3aed;color:white;}
 .btn:hover{transform:translateY(-1px);}
 .compare{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}
 .col{background:#1a1d24;border-radius:12px;padding:14px;border:1px solid #2a2f3a;}
@@ -1862,6 +1958,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 <form method="POST" action="/trace-editor" style="display:inline;"><input type="hidden" name="trace_mode" value="light"><button type="submit" class="btn btn-gray">Trace Light</button></form>
 <form method="POST" action="/trace-editor" style="display:inline;"><input type="hidden" name="trace_mode" value="medium"><button type="submit" class="btn btn-gray">Trace Medium</button></form>
 <form method="POST" action="/trace-editor" style="display:inline;"><input type="hidden" name="trace_mode" value="detailed"><button type="submit" class="btn btn-gray">Trace Detailed</button></form>
+<form method="POST" action="/claude-review" style="display:inline;"><button type="submit" class="btn btn-purple">Claude Review</button></form>
 <form method="POST" action="/mask-approve" style="display:inline;"><button type="submit" class="btn btn-green">&#10003; Approve & Continue to Editor &rarr;</button></form>
 </div>
 </div>
@@ -1894,6 +1991,53 @@ If too much was removed, use a preset below to re-process with a different filte
 </body></html>'''
 
 
+CLAUDE_REVIEW_PAGE = '''<!DOCTYPE html>
+<html><head><title>Claude Review v34</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;padding:18px;}
+.wrap{max-width:1100px;margin:0 auto;}
+.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding:16px 22px;background:#1a1d24;border-radius:12px;border:1px solid #7c3aed66;}
+h1{color:#c4b5fd;font-size:22px;}
+.sub{color:#a0aec0;font-size:13px;margin-top:4px;}
+.actions{display:flex;gap:8px;flex-wrap:wrap;}
+.btn{padding:10px 18px;border-radius:8px;border:none;font-size:14px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block;}
+.btn-gray{background:#333;color:white;}
+.btn-blue{background:#2563eb;color:white;}
+.btn-green{background:#16a34a;color:white;}
+.panel{background:#151922;border:1px solid #2a2f3a;border-radius:12px;padding:18px 22px;line-height:1.55;}
+.panel h2{font-size:13px;letter-spacing:1px;text-transform:uppercase;color:#c4b5fd;margin-bottom:10px;}
+.review{white-space:pre-wrap;color:#e5e7eb;font-size:15px;}
+.hint{background:#1f2937;border-left:4px solid #7c3aed;border-radius:6px;padding:10px 12px;margin-bottom:14px;color:#cbd5e1;font-size:13px;}
+.foot{text-align:center;color:#666;margin-top:18px;font-size:12px;}
+</style></head><body>
+<div class="wrap">
+<div class="head">
+<div>
+<h1>Claude Review <span style="font-size:12px;background:#7c3aed;color:white;padding:3px 8px;border-radius:5px;">v34 advisor</span></h1>
+<div class="sub">AI reviewer for Smart Trace + Smart Cleanup decisions</div>
+</div>
+<div class="actions">
+<form method="POST" action="/mask-retry" style="display:inline;"><input type="hidden" name="mask_preset" value="balanced"><button type="submit" class="btn btn-gray">Back to Mask</button></form>
+<form method="POST" action="/floorplan-base" style="display:inline;"><button type="submit" class="btn btn-blue">Floorplan Base</button></form>
+<form method="POST" action="/trace-editor" style="display:inline;"><input type="hidden" name="trace_mode" value="light"><button type="submit" class="btn btn-green">Trace Light</button></form>
+</div>
+</div>
+
+<div class="hint">
+This does not replace the trace engine. It reviews the current original/mask/base images and recommends the fastest BAS cleanup path.
+</div>
+
+<div class="panel">
+<h2>Recommendation</h2>
+<div class="review">{{ review_text }}</div>
+</div>
+
+<div class="foot">Made by Paolo V. R.</div>
+</div>
+</body></html>'''
+
+
 FLOORPLAN_BASE_PAGE = '''<!DOCTYPE html>
 <html><head><title>Floorplan Base v31</title>
 <style>
@@ -1909,6 +2053,7 @@ body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;mi
 .btn-blue{background:#2563eb;color:white;}
 .btn-green{background:#16a34a;color:white;}
 .btn-gray{background:#e5e7eb;color:#111827;}
+.btn-purple{background:#7c3aed;color:white;}
 .panel{background:white;border:1px solid #d8dee8;border-radius:12px;padding:14px;box-shadow:0 8px 24px rgba(15,23,42,0.08);}
 .panel h2{font-size:13px;letter-spacing:1px;text-transform:uppercase;color:#475569;margin-bottom:10px;}
 .panel img{width:100%;display:block;border-radius:8px;border:1px solid #cbd5e1;background:white;}
@@ -1929,6 +2074,7 @@ body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;mi
 <form method="POST" action="/mask-approve" style="display:inline;"><button type="submit" class="btn btn-blue">Back to Mask Editor Flow</button></form>
 <form method="POST" action="/trace-editor" style="display:inline;"><input type="hidden" name="trace_mode" value="light"><button type="submit" class="btn btn-blue">Trace Light</button></form>
 <form method="POST" action="/trace-editor" style="display:inline;"><input type="hidden" name="trace_mode" value="medium"><button type="submit" class="btn btn-blue">Trace Medium</button></form>
+<form method="POST" action="/claude-review" style="display:inline;"><button type="submit" class="btn btn-purple">Claude Review</button></form>
 <form method="POST" action="/floorplan-base-approve" style="display:inline;"><button type="submit" class="btn btn-green">Use This Base in Editor &rarr;</button></form>
 </div>
 </div>
@@ -3575,6 +3721,21 @@ def editor():
         initial_elements=json.dumps([]),
         detected_message=""
     )
+
+
+@app.route("/claude-review", methods=["POST"])
+def claude_review():
+    """v34: Claude API advisor for choosing the next cleanup/trace step."""
+    try:
+        review_text = run_claude_plan_review()
+        return render_template_string(
+            CLAUDE_REVIEW_PAGE,
+            review_text=review_text
+        )
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        return f"<h2 style='color:white;background:#0d0f14;padding:30px;'>Claude Review error: {str(e)}<br><pre style='color:#aaa;font-size:11px;'>{tb}</pre><a href='/' style='color:#2d89ef'>Back</a></h2>"
 
 
 @app.route("/floorplan-base", methods=["POST"])
