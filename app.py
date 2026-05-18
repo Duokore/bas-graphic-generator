@@ -559,8 +559,8 @@ def _footprint_to_extwall(footprint, accuracy="normal"):
         return None
     # v32.1: preserve more exterior corners. The old simplification made the
     # footprint look clean, but not accurate enough to the real plan shape.
-    ratio = 0.004 if accuracy == "high" else 0.007
-    epsilon = max(3.0, ratio * cv2.arcLength(largest, True))
+    ratio = 0.0018 if accuracy == "high" else 0.006
+    epsilon = max(1.8, ratio * cv2.arcLength(largest, True))
     approx = cv2.approxPolyDP(largest, epsilon, True)
     points = []
     for p in approx.reshape(-1, 2):
@@ -728,6 +728,20 @@ def detect_editable_wall_trace(clean_mask, original_img=None, trace_mode="light"
             "detected": True,
             "source": "v32_trace"
         })
+
+    # Door/opening candidates from gaps between collinear traced wall segments.
+    # This is intentionally capped and conservative: doors are helpful hints,
+    # not a claim that the app understands every opening.
+    traced_lines = []
+    for el in elements:
+        if el.get("type") == "intwall" and el.get("points") and len(el["points"]) >= 2:
+            p1, p2 = el["points"][0], el["points"][1]
+            traced_lines.append([int(p1["x"]), int(p1["y"]), int(p2["x"]), int(p2["y"])])
+    doors = detect_doors_in_walls(traced_lines, min_gap=max(18, int(max(h, w) * 0.015)), max_gap=max(55, int(max(h, w) * 0.055)))
+    for door in doors[:20]:
+        door["detected"] = True
+        door["source"] = "v32_2_gap"
+        elements.append(door)
 
     return elements
 
@@ -1747,11 +1761,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v32.1 <span class="badge">TRACE MODES</span></h1>
+<h1>BAS Generator v32.2 <span class="badge">TRACE CLEANUP</span></h1>
 <p class="sub">Smart trace + clean floorplan shape workflow</p>
 
 <div class="tip">
-<b>v32.1 NEW:</b> Trace Light/Medium/Detailed plus more accurate exterior shape and office wall candidates.
+<b>v32.2 NEW:</b> More accurate exterior shape, door/opening hints, and faster cleanup buttons.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1771,7 +1785,7 @@ Auto-Detect Colors
 <small>Detects HVAC if pre-marked</small>
 </button>
 <button type="button" class="option-btn" id="maskBtn" onclick="setMode('mask')" style="border:2px solid #22d3ee;">
-&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v32.1</span>
+&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v32.2</span>
 <small>Mask first, then Floorplan Base</small>
 </button>
 </div>
@@ -1836,7 +1850,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 
 <div class="head">
 <div>
-<h1>&#10024; Architectural Mask Preview <span class="badge">v32.1</span></h1>
+<h1>&#10024; Architectural Mask Preview <span class="badge">v32.2</span></h1>
 <div class="sub">Compare original vs. clean architectural mask before editing</div>
 </div>
 <div class="actions">
@@ -1904,7 +1918,7 @@ body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;mi
 <div class="wrap">
 <div class="head">
 <div>
-<h1>Floorplan Shape Base <span class="badge">v32.1 preview</span></h1>
+<h1>Floorplan Shape Base <span class="badge">v32.2 preview</span></h1>
 <div class="sub">First visual pass: same floorplan shape, cleaner BAS-style base</div>
 </div>
 <div class="actions">
@@ -1978,6 +1992,8 @@ canvas{display:block;}
 <button onclick="alignSelected('v')" class="action-btn btn-blue" title="Align selected walls vertical">&#8597; Align V</button>
 <button onclick="duplicateSelected()" class="action-btn btn-gray" title="Duplicate selected (Ctrl+D)">&#x2398; Duplicate</button>
 <button onclick="clearDetectedOnly()" class="action-btn btn-orange">Clear Detected</button>
+<button onclick="keepExteriorOnly()" class="action-btn btn-orange">Keep Exterior Only</button>
+<button onclick="clearInteriorTrace()" class="action-btn btn-orange">Clear Interior Trace</button>
 <button onclick="snapWalls()" class="action-btn btn-blue">Snap Walls</button>
 <button onclick="clearAll()" class="action-btn btn-red">Clear All</button>
 <button onclick="autoBranchDiffusers()" class="action-btn btn-purple">Auto-Connect Diffusers</button>
@@ -2828,6 +2844,40 @@ function clearDetectedOnly(){
     redraw();
 }
 
+// v32.2: Keep only exterior shape when interior trace is too noisy.
+function keepExteriorOnly(){
+    const before = elements.length;
+    elements = elements.filter(el => el.type === 'extwall');
+    selectedSet.clear();
+    const removed = before - elements.length;
+    if(removed === 0){
+        alert('Only exterior walls were present.');
+        return;
+    }
+    saveState();
+    redraw();
+    document.getElementById('statusBar').textContent = `Kept exterior shape and removed ${removed} other elements.`;
+}
+
+// v32.2: Remove auto-traced interiors/doors, keep exterior and manual HVAC.
+function clearInteriorTrace(){
+    const before = elements.length;
+    elements = elements.filter(el => {
+        if(!el.detected) return true;
+        if(el.type === 'extwall') return true;
+        return !(el.type === 'intwall' || el.type === 'door');
+    });
+    selectedSet.clear();
+    const removed = before - elements.length;
+    if(removed === 0){
+        alert('No detected interior trace to clear.');
+        return;
+    }
+    saveState();
+    redraw();
+    document.getElementById('statusBar').textContent = `Cleared ${removed} detected interior trace elements.`;
+}
+
 // v29: Snap walls - align almost-straight walls to perfect H/V and merge close ones
 function snapWalls(){
     const SNAP_ANGLE_DEG = 8;
@@ -3491,14 +3541,15 @@ def trace_editor():
         elements = detect_editable_wall_trace(clean_mask, original_img=original_img, trace_mode=trace_mode)
         n_ext = sum(1 for e in elements if e.get("type") == "extwall")
         n_int = sum(1 for e in elements if e.get("type") == "intwall")
+        n_doors = sum(1 for e in elements if e.get("type") == "door")
         bg_path = UPLOAD_IMAGE_PATH if os.path.exists(UPLOAD_IMAGE_PATH) else MASK_PREVIEW_PATH
         return render_template_string(
             EDITOR_PAGE,
             image_b64=image_to_base64(bg_path),
             initial_elements=json.dumps(elements),
             detected_message=(
-                f"v32.1 Auto Trace {trace_mode}: {n_ext} exterior shape + {n_int} editable wall lines. "
-                "Use Move/Delete/Box Erase/Snap Walls to clean quickly."
+                f"v32.2 Auto Trace {trace_mode}: {n_ext} exterior shape + {n_int} editable wall lines "
+                f"+ {n_doors} door/opening hints. Use cleanup buttons when trace is noisy."
             )
         )
     except Exception as e:
