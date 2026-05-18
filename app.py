@@ -1761,11 +1761,11 @@ input[type=file]{background:transparent;color:#aab0c4;border:none;font-size:13px
 </style></head><body>
 <div class="card">
 <div class="logo">&#127970;</div>
-<h1>BAS Generator v32.2 <span class="badge">TRACE CLEANUP</span></h1>
+<h1>BAS Generator v33 <span class="badge">ROOM TOOLBOX</span></h1>
 <p class="sub">Smart trace + clean floorplan shape workflow</p>
 
 <div class="tip">
-<b>v32.2 NEW:</b> More accurate exterior shape, door/opening hints, and faster cleanup buttons.
+<b>v33 NEW:</b> Room Rect toolbox, short-line cleanup, exterior-only cleanup, and faster manual floorplan building.
 </div>
 
 <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
@@ -1785,7 +1785,7 @@ Auto-Detect Colors
 <small>Detects HVAC if pre-marked</small>
 </button>
 <button type="button" class="option-btn" id="maskBtn" onclick="setMode('mask')" style="border:2px solid #22d3ee;">
-&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v32.2</span>
+&#10024; Mask Preview <span style="background:#22d3ee;color:#000;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;">NEW v33</span>
 <small>Mask first, then Floorplan Base</small>
 </button>
 </div>
@@ -1850,7 +1850,7 @@ body{background:#0d0f14;color:white;font-family:'Segoe UI',Arial,sans-serif;min-
 
 <div class="head">
 <div>
-<h1>&#10024; Architectural Mask Preview <span class="badge">v32.2</span></h1>
+<h1>&#10024; Architectural Mask Preview <span class="badge">v33</span></h1>
 <div class="sub">Compare original vs. clean architectural mask before editing</div>
 </div>
 <div class="actions">
@@ -1918,7 +1918,7 @@ body{background:#f5f6f8;color:#111827;font-family:'Segoe UI',Arial,sans-serif;mi
 <div class="wrap">
 <div class="head">
 <div>
-<h1>Floorplan Shape Base <span class="badge">v32.2 preview</span></h1>
+<h1>Floorplan Shape Base <span class="badge">v33 preview</span></h1>
 <div class="sub">First visual pass: same floorplan shape, cleaner BAS-style base</div>
 </div>
 <div class="actions">
@@ -1994,6 +1994,7 @@ canvas{display:block;}
 <button onclick="clearDetectedOnly()" class="action-btn btn-orange">Clear Detected</button>
 <button onclick="keepExteriorOnly()" class="action-btn btn-orange">Keep Exterior Only</button>
 <button onclick="clearInteriorTrace()" class="action-btn btn-orange">Clear Interior Trace</button>
+<button onclick="clearShortLines()" class="action-btn btn-orange">Clear Short Lines</button>
 <button onclick="snapWalls()" class="action-btn btn-blue">Snap Walls</button>
 <button onclick="clearAll()" class="action-btn btn-red">Clear All</button>
 <button onclick="autoBranchDiffusers()" class="action-btn btn-purple">Auto-Connect Diffusers</button>
@@ -2007,6 +2008,9 @@ canvas{display:block;}
 </button>
 <button class="tool-btn" data-tool="intwall" onclick="selectTool(this)">
 <div class="color-swatch" style="background:#ea580c"></div> Int Wall
+</button>
+<button class="tool-btn" data-tool="room_rect" onclick="selectTool(this)">
+<div class="color-swatch" style="background:#ea580c"></div> Room Rect
 </button>
 <button class="tool-btn" data-tool="duct" onclick="selectTool(this)">
 <div class="color-swatch" style="background:#fff;border:1px solid #888"></div> Duct
@@ -2078,6 +2082,9 @@ let snapTarget = null;        // { x, y, type: 'endpoint'|'wall' } - shown as pr
 // v29: Rectangle eraser state
 let eraseRectStart = null;
 let eraseRectCurrent = null;
+// v33: Room rectangle state
+let roomRectStart = null;
+let roomRectCurrent = null;
 // v29: Door state (2-click line)
 let doorFirstPoint = null;
 
@@ -2090,6 +2097,7 @@ const COLORS = {
 const STATUS_TEXTS = {
     extwall:'Click corners of building PERIMETER. Double-click to close.',
     intwall:'Click corners of an INTERIOR WALL. Double-click to finish.',
+    room_rect:'Drag a rectangle to create a room/office as one editable wall group.',
     duct:'Click TWO points for a straight duct line.',
     vav:'Click to place a VAV.',
     ahu:'Click to place the AHU.',
@@ -2125,6 +2133,8 @@ function selectTool(btn){
     // v29: Reset new tool states
     eraseRectStart = null;
     eraseRectCurrent = null;
+    roomRectStart = null;
+    roomRectCurrent = null;
     doorFirstPoint = null;
     drawCanvas.className = '';
     if(currentTool === 'move') drawCanvas.classList.add('cursor-move');
@@ -2279,6 +2289,11 @@ drawCanvas.addEventListener('mousemove', function(e){
         redraw();
         return;
     }
+    if(currentTool === 'room_rect' && roomRectStart){
+        roomRectCurrent = pos;
+        redraw();
+        return;
+    }
     if(currentPolyline || doorFirstPoint) redraw();
 });
 
@@ -2288,6 +2303,12 @@ drawCanvas.addEventListener('mousedown', function(e){
     if(currentTool === 'erase_rect'){
         eraseRectStart = pos;
         eraseRectCurrent = pos;
+        return;
+    }
+    // v33: Room rectangle start
+    if(currentTool === 'room_rect'){
+        roomRectStart = pos;
+        roomRectCurrent = pos;
         return;
     }
     if(currentTool !== 'move') return;
@@ -2340,6 +2361,34 @@ function findEndpointAt(pos, threshold){
 }
 
 drawCanvas.addEventListener('mouseup', function(e){
+    // v33: Room rectangle apply
+    if(currentTool === 'room_rect' && roomRectStart && roomRectCurrent){
+        const rx1 = Math.min(roomRectStart.x, roomRectCurrent.x);
+        const ry1 = Math.min(roomRectStart.y, roomRectCurrent.y);
+        const rx2 = Math.max(roomRectStart.x, roomRectCurrent.x);
+        const ry2 = Math.max(roomRectStart.y, roomRectCurrent.y);
+        const rw = rx2 - rx1;
+        const rh = ry2 - ry1;
+        roomRectStart = null;
+        roomRectCurrent = null;
+        if(rw > 12 && rh > 12){
+            elements.push({
+                type: 'intwall',
+                points: [
+                    { x: rx1, y: ry1 },
+                    { x: rx2, y: ry1 },
+                    { x: rx2, y: ry2 },
+                    { x: rx1, y: ry2 },
+                    { x: rx1, y: ry1 }
+                ],
+                detected: false,
+                source: 'room_rect'
+            });
+            saveState();
+        }
+        redraw();
+        return;
+    }
     // v29: Rectangle eraser apply
     if(currentTool === 'erase_rect' && eraseRectStart && eraseRectCurrent){
         const rx1 = Math.min(eraseRectStart.x, eraseRectCurrent.x);
@@ -2433,6 +2482,7 @@ document.addEventListener('keydown', function(e){
         if(currentPolyline){ currentPolyline = null; redraw(); }
         if(doorFirstPoint){ doorFirstPoint = null; redraw(); }
         if(eraseRectStart){ eraseRectStart = null; eraseRectCurrent = null; redraw(); }
+        if(roomRectStart){ roomRectStart = null; roomRectCurrent = null; redraw(); }
         // v29: Escape clears multi-selection
         if(selectedSet.size > 0){ selectedSet.clear(); redraw(); }
     }
@@ -2643,6 +2693,20 @@ function redraw(){
         drawCtx.strokeStyle = '#dc2626';
         drawCtx.lineWidth = 2;
         drawCtx.setLineDash([8, 4]);
+        drawCtx.strokeRect(x, y, w, h);
+        drawCtx.setLineDash([]);
+    }
+    // v33: Room rectangle preview
+    if(roomRectStart && roomRectCurrent){
+        const x = Math.min(roomRectStart.x, roomRectCurrent.x);
+        const y = Math.min(roomRectStart.y, roomRectCurrent.y);
+        const w = Math.abs(roomRectCurrent.x - roomRectStart.x);
+        const h = Math.abs(roomRectCurrent.y - roomRectStart.y);
+        drawCtx.fillStyle = 'rgba(234, 88, 12, 0.10)';
+        drawCtx.fillRect(x, y, w, h);
+        drawCtx.strokeStyle = '#ea580c';
+        drawCtx.lineWidth = 4;
+        drawCtx.setLineDash([10, 5]);
         drawCtx.strokeRect(x, y, w, h);
         drawCtx.setLineDash([]);
     }
@@ -2876,6 +2940,31 @@ function clearInteriorTrace(){
     saveState();
     redraw();
     document.getElementById('statusBar').textContent = `Cleared ${removed} detected interior trace elements.`;
+}
+
+// v33: Remove short detected wall fragments while keeping exterior and room rectangles.
+function clearShortLines(){
+    const MIN_LEN = Math.max(50, Math.min(drawCanvas.width, drawCanvas.height) * 0.08);
+    const before = elements.length;
+    elements = elements.filter(el => {
+        if(el.type !== 'intwall' || !el.points || el.points.length < 2) return true;
+        if(!el.detected) return true;
+        let total = 0;
+        for(let i = 0; i < el.points.length - 1; i++){
+            const a = el.points[i], b = el.points[i+1];
+            total += Math.hypot(b.x - a.x, b.y - a.y);
+        }
+        return total >= MIN_LEN;
+    });
+    selectedSet.clear();
+    const removed = before - elements.length;
+    if(removed === 0){
+        alert('No short detected lines were found.');
+        return;
+    }
+    saveState();
+    redraw();
+    document.getElementById('statusBar').textContent = `Removed ${removed} short detected wall fragments.`;
 }
 
 // v29: Snap walls - align almost-straight walls to perfect H/V and merge close ones
